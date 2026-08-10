@@ -2,18 +2,21 @@ from contextlib import contextmanager
 from requests import exceptions
 from sqlalchemy.exc import IntegrityError
 
-import logger
+from logger import logger
 
-logger = logger.setup_logging(__name__)
 
 @contextmanager
 def fail_on_error():
     try:
         yield
     except exceptions.HTTPError as e:
-        logger.error("HTTPError %s: %s - %s", e.response.status_code, e.response.reason, e.response.text)
+        if e.response is not None:
+            logger.error("HTTPError %s: %s - %s", e.response.status_code, e.response.reason, e.response.text)
+        else:
+            logger.error("HTTPError (no response): %s", e)
     except (exceptions.RequestException, AttributeError) as e:
         logger.error(e)
+
 
 @contextmanager
 def fail_on_db_insert_error(session):

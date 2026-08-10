@@ -1,18 +1,21 @@
 import os
-from typing import Any
-import logger
-import context_manager
 
+from typing import Any
 from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy.orm import DeclarativeBase, Session
 
-logger = logger.setup_logging(__name__)
-Base = declarative_base()
+import context_manager
+from logger import logger
+
+
+class Base(DeclarativeBase):
+    pass
+
 
 load_dotenv()
-DEFAULT_SQLITE_URL = os.getenv('DB_URL')
+DEFAULT_SQLITE_URL = os.getenv("DB_URL")
 
 # ------------------------------------------------------------
 # DB Tables
@@ -21,14 +24,10 @@ BLOCK_FIELDS_TO_EXCLUDE = ["tx", "nextblockhash", "target", "coinbase_tx"]
 TRANSACTION_FIELDS_TO_EXCLUDE = ["vin", "vout"]
 COINBASETX_FIELDS_TO_EXCLUDE = ["witness"]
 
-STALE_BLOCK_FIELDS = {
-    "confirmations"
-}
+STALE_BLOCK_FIELDS = {"confirmations"}
 
 # what about "in_active_chain"?
-STALE_TRANSACTION_FIELDS = {
-    "confirmations"
-}
+STALE_TRANSACTION_FIELDS = {"confirmations"}
 
 
 class Blocks(Base):
@@ -51,6 +50,7 @@ class Blocks(Base):
     nTx = Column(Integer)
     previousblockhash = Column(String)
 
+
 class Transactions(Base):
     __tablename__ = "transactions"
     txid = Column(String, primary_key=True)
@@ -66,6 +66,7 @@ class Transactions(Base):
     fee = Column(Integer)
     blockhash = Column(String, ForeignKey("blocks.hash"))
 
+
 class Inputs(Base):
     __tablename__ = "inputs"
     spending_txid = Column(String, ForeignKey("transactions.txid"), primary_key=True)
@@ -76,12 +77,14 @@ class Inputs(Base):
     sequence = Column(Integer)
     txinwitness = Column(JSON)
 
+
 class Outputs(Base):
     __tablename__ = "outputs"
     spending_txid = Column(String, ForeignKey("transactions.txid"), primary_key=True)
     n = Column(Integer, primary_key=True)
     value = Column(Integer)
     scriptPubKey = Column(JSON)
+
 
 class CoinbaseInputs(Base):
     __tablename__ = "coinbaseinputs"
@@ -92,12 +95,17 @@ class CoinbaseInputs(Base):
     sequence = Column(Integer)
     coinbase = Column(String)
 
+
 # --------------
 # DB Set Up
 # --------------
 def get_database_url() -> str:
     load_dotenv()
-    return os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
+    url = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
+    if url is None:
+        raise ValueError("Database URL is not set.")
+    return url
+
 
 def create_db_engine(url: str | None = None):
     with context_manager.fail_on_error():
@@ -105,21 +113,23 @@ def create_db_engine(url: str | None = None):
         url = url or get_database_url()
         connect_args = {}
         if url.startswith("sqlite"):
-            #TODO: Required when the engine is shared across threads?
+            # TODO: Required when the engine is shared across threads?
             connect_args["check_same_thread"] = False
         logger.info("Database Engine created.")
         return create_engine(url, echo=False, hide_parameters=True, connect_args=connect_args)
 
+
 def create_tables(engine: Engine) -> None:
-    #TODO: for later use Alembic instead
+    # TODO: for later use Alembic instead
     with context_manager.fail_on_error():
         logger.info("Creating Tables...")
         Base.metadata.create_all(engine)
         table_names = inspect(engine).get_table_names()
         logger.info("Tables created: %s", table_names)
 
+
 def set_up_db() -> Engine:
-    db_url=get_database_url()
+    db_url = get_database_url()
     engine = create_db_engine(db_url)
     create_tables(engine)
     return engine
@@ -143,44 +153,45 @@ def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session)
         s.commit()
         logger.info("Insertion done.")
 
-def _prepare_block_data(block: dict) -> list[dict, dict, list,list, list]:
+
+def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
     with context_manager.fail_on_error():
-        txs = block['tx']
+        txs = block["tx"]
         block_hash = block["hash"]
-        cb = block['coinbase_tx']
+        cb = block["coinbase_tx"]
 
         inputs = []
         outputs = []
         coinbase_spending_txid = None
 
         for k, tx in enumerate(txs):
-            #1. Transactions
+            # 1. Transactions
             txid = tx["txid"]
-            txs[k] = {**tx, 'blockhash': block_hash, 'n': k}
+            txs[k] = {**tx, "blockhash": block_hash, "n": k}
 
-            #1. Inputs
+            # 1. Inputs
             for n, i in enumerate[Any](txs[k]["vin"]):
                 i["spending_txid"] = txid
                 i["n"] = n
 
-                #2. Coinbase
+                # 2. Coinbase
                 if k == 0 and n == 0 and "coinbase" in i:
                     coinbase_spending_txid = txid
-                    cb = {**cb, 'blockhash': block_hash, 'spending_txid': coinbase_spending_txid}
-                    break # first input of first block's tx is COINBASE not INPUTS
+                    cb = {**cb, "blockhash": block_hash, "spending_txid": coinbase_spending_txid}
+                    break  # first input of first block's tx is COINBASE not INPUTS
 
                 inputs.append(i)
 
-            #3. Outputs
+            # 3. Outputs
             for o in txs[k]["vout"]:
                 o["spending_txid"] = txid
                 outputs.append(o)
 
-            #4. Transactions clean up
+            # 4. Transactions clean up
             for field in TRANSACTION_FIELDS_TO_EXCLUDE:
                 del txs[k][field]
 
-        #5. Blocks & CoinbaseInputs clean up
+        # 5. Blocks & CoinbaseInputs clean up
         for field in BLOCK_FIELDS_TO_EXCLUDE:
             del block[field]
         for field in COINBASETX_FIELDS_TO_EXCLUDE:

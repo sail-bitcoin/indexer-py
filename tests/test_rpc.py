@@ -4,24 +4,23 @@ import pathlib
 import tempfile
 import pytest
 import json
-import urllib3
-import requests
 import requests_mock
 
 from urllib3.response import HTTPResponse
-from requests.adapters import HTTPAdapter, Retry
+from requests.adapters import HTTPAdapter
 from contextlib import contextmanager
 from unittest.mock import patch
 
-import bitcoin_indexer.logger
 import bitcoin_indexer.rpc as rpc
 
 
 @contextmanager
 def prepare_rpc_call_cache_dir(access_token="foo"):
-    with tempfile.TemporaryDirectory() as tmp_dir, \
-        patch.object(rpc, "RPC_CACHE_DIR", pathlib.Path(tmp_dir)), \
-        patch.dict(os.environ, {"GETBLOCK_ACCESS_TOKEN": access_token}, clear=True):
+    with (
+        tempfile.TemporaryDirectory() as tmp_dir,
+        patch.object(rpc, "RPC_CACHE_DIR", pathlib.Path(tmp_dir)),
+        patch.dict(os.environ, {"GETBLOCK_ACCESS_TOKEN": access_token}, clear=True),
+    ):
         yield pathlib.Path(tmp_dir)
 
 
@@ -34,14 +33,13 @@ class TestGetBlockClient(unittest.TestCase):
         self.block_hash = "000000000000000000002bb58bd9225e26120abfab13434310c3252cfa5a982e"
         self.cache_file_name = "getblockhash_b14e2493ac3bef439b9f3941d853b79c4bc11fff7c5244acbac3d9e375b767b9.json"
 
-    
     # -----------
     # rpc_url
     # -----------
     @patch.dict(os.environ, {"GETBLOCK_ACCESS_TOKEN": "foo"}, clear=True)
     def test_rpc_url(self):
         gbc = rpc.GetBlockClient()
-        self.assertEqual(gbc.rpc_url, "https://go.getblock.io/foo")    
+        self.assertEqual(gbc.rpc_url, "https://go.getblock.io/foo")
 
     @patch("bitcoin_indexer.rpc.load_dotenv")
     def test_rpc_url_without_env_var_should_fail(self, mock_load_dotenv):
@@ -52,7 +50,7 @@ class TestGetBlockClient(unittest.TestCase):
                 assert False
             except RuntimeError:
                 assert True
-    
+
     # -----------
     # call_rpc
     # -----------
@@ -80,16 +78,16 @@ class TestGetBlockClient(unittest.TestCase):
                 m.post(gbc.rpc_url, json={"result": "fake"})
                 result = gbc.call_rpc(self.verb, self.method, self.params)
             assert result == self.block_hash
-            assert (not m.called)
+            assert not m.called
 
     @patch("urllib3.connectionpool.HTTPConnectionPool._make_request")
     def test_call_rpc_retries_on_failure(self, mock__make_request):
         with prepare_rpc_call_cache_dir():
             gbc = rpc.GetBlockClient()
             fast_retries = gbc._retries.new(backoff_factor=0.01)
-            total_retries = gbc._retries.total + 1
+            total_retries = (gbc._retries.total or 0) + 1
             gbc._session.mount("https://", HTTPAdapter(max_retries=fast_retries))
-            
+
             mock__make_request.return_value = HTTPResponse(
                 body="b",
                 status=500,
@@ -97,10 +95,9 @@ class TestGetBlockClient(unittest.TestCase):
                 request_url="foo.com",
                 preload_content=False,
             )
-            result = gbc.call_rpc(self.verb, self.method, self.params)
+            gbc.call_rpc(self.verb, self.method, self.params)
 
             assert mock__make_request.call_count == total_retries
-
 
     # -----------
     # rpc_url's wrapper
@@ -115,6 +112,6 @@ class TestGetBlockClient(unittest.TestCase):
             assert wrapper_result == self.block_hash
             assert m.called
 
-    
+
 if __name__ == "__main__":
-    unittest.main(self)
+    unittest.main()

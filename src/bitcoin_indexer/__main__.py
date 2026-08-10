@@ -1,11 +1,12 @@
 import cProfile
 import pstats
 
+from sqlalchemy.engine import Engine
+
+import db
 import logger
 import rpc
-import db
 
-from sqlalchemy.engine import Engine
 
 logger = logger.setup_logging(__name__)
 
@@ -15,6 +16,7 @@ def insert_block_with_txs(block_number: int, engine: Engine):
     block_hash = block.get_block_hash(block_number)
     b = block.get_block(block_hash, verbosity=2)
     db.insert_all(b, engine)
+
 
 if __name__ == "__main__":
     # -----------
