@@ -186,7 +186,7 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
         return new_block, cb, txs, inputs, outputs
 
 
-def insert_all(block: dict, engine: Engine):
+def insert_block(block: dict, engine: Engine):
     block_info, coinbase, txs, inputs, outputs = _prepare_block_data(block)
     logger.info("Adding Blocks height: %s and all it's transactions...", block["height"])
     with Session(engine) as s:
@@ -196,3 +196,8 @@ def insert_all(block: dict, engine: Engine):
         insert_from_dict(inputs, Inputs, s)
         insert_from_dict(outputs, Outputs, s)
         logger.info("Finished processing block %s.", block["height"])
+
+
+def insert_blocks(blocks: list[dict], engine: Engine):
+    for block in blocks:
+        insert_block(block, engine)
