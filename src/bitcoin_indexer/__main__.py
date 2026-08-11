@@ -1,8 +1,8 @@
-import cProfile
-import pstats
+import asyncio
 
 from sqlalchemy.engine import Engine
 
+import benchmark
 import db
 import logger
 import rpc
@@ -10,23 +10,21 @@ import rpc
 
 logger = logger.setup_logging(__name__)
 
-
-def insert_block_with_txs(block_number: int, engine: Engine):
-    block = rpc.Blocks()
-    block_hash = block.get_block_hash(block_number)
-    b = block.get_block(block_hash, verbosity=2)
-    db.insert_block(b, engine)
-
+START_HEIGHT = 862050
+N_BLOCKS = 10
 
 if __name__ == "__main__":
     # -----------
     #  MVP
     # -----------
-    with cProfile.Profile() as profile:
-        BLOCK_NUMBER = 957390
-        e = db.set_up_db()
-        insert_block_with_txs(BLOCK_NUMBER, e)
+    rec = benchmark.Recorder(strategy="sequential", n_blocks=N_BLOCKS)
+    b = rpc.Blocks()
+    e = db.set_up_db()
 
-    results = pstats.Stats(profile)
-    results.sort_stats(pstats.SortKey.TIME)
-    results.dump_stats("./var/results.prof")
+    for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS):
+        block_hash = b.get_block_hash(h)
+        block = b.get_block(block_hash)
+        db.insert_block(block, e)
+
+    path = rec.save()
+    print(f"Saved benchmark to {path}")
