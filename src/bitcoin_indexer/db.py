@@ -1,6 +1,5 @@
 import os
 
-from typing import Any
 from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect
 from sqlalchemy.engine import Engine

@@ -1,11 +1,11 @@
 import os
 import unittest
-import pytest
-
 from unittest.mock import patch
+
+import pytest
 from sqlalchemy.orm import Session
 
-import bitcoin_indexer.db as db
+from bitcoin_indexer import db
 import tests.variables as var
 
 

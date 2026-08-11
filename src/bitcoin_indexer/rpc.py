@@ -1,13 +1,13 @@
 import hashlib
 import json
 import os
-import requests
-
 from pathlib import Path
+
+import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
 from requests.exceptions import HTTPError
+from urllib3.util import Retry
 
 from logger import logger
 import context_manager
@@ -48,7 +48,7 @@ class GetBlockClient:
         s.mount("https://", HTTPAdapter(max_retries=self._retries))
         return s
 
-    def call_rpc(self, verb: str, method: str, params: list = []):
+    def call_rpc(self, verb: str, method: str, params: list | None = None):
         cache_key = hashlib.sha256(f"{method}:{params}".encode()).hexdigest()
         cache_file = RPC_CACHE_DIR / f"{method}_{cache_key}.json"
         if cache_file.exists():

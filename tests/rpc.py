@@ -2,16 +2,16 @@ import unittest
 import os
 import pathlib
 import tempfile
-import pytest
 import json
-import requests_mock
+from unittest.mock import patch
+from contextlib import contextmanager
 
+import pytest
+import requests_mock
 from urllib3.response import HTTPResponse
 from requests.adapters import HTTPAdapter
-from contextlib import contextmanager
-from unittest.mock import patch
 
-import bitcoin_indexer.rpc as rpc
+from bitcoin_indexer import rpc
 
 
 @contextmanager
