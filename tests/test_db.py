@@ -1,32 +1,17 @@
+import os
 import unittest
-from unittest.mock import MagicMock
+import pytest
 
-from sqlalchemy import Column, Integer, String
-from sqlalchemy.orm import declarative_base, Session
+from unittest.mock import patch
+from sqlalchemy.orm import Session
 
 import bitcoin_indexer.db as db
 import tests.variables as var
 
-Base = declarative_base()
-
-
-class TableTest(Base):
-    __tablename__ = "tabletest"
-    hash = Column(String, primary_key=True)
-    height = Column(Integer)
-    size = Column(Integer)
-
 
 class TestDb(unittest.TestCase):
-    # TODO
-    # def test_insert_from_dict(self):
-    #    mock_session = MagicMock(spec=Session)
-    #    res = [var.block_a, var.block_b]
-    #    db.insert_from_dict(res, TableTest, mock_session)
-
     def test_prepare_block_data(self):
         raw_block = var.block_b
-
         # first, check if field to exclude exists
         for field in db.BLOCK_FIELDS_TO_EXCLUDE:
             assert field in raw_block
@@ -35,10 +20,8 @@ class TestDb(unittest.TestCase):
                 assert field in tx
         for field in db.COINBASETX_FIELDS_TO_EXCLUDE:
             assert field in raw_block["coinbase_tx"]
-
         # prepare block data
         block, cb, txs, inputs, outputs = db._prepare_block_data(raw_block)
-
         # check if field to exclude has been removed
         for field in db.BLOCK_FIELDS_TO_EXCLUDE:
             assert field not in block
@@ -47,11 +30,24 @@ class TestDb(unittest.TestCase):
                 assert field not in tx
         for field in db.COINBASETX_FIELDS_TO_EXCLUDE:
             assert field not in cb
-
         # check looping mecanism
         assert len(txs) == 2
         assert len(inputs) == (len(txs) - 1)  # tx[0]["vin"] is coinbase not input
         assert len(outputs) == 4
+
+    @pytest.mark.integration
+    @patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
+    def test_insert_from_dict(self):
+        engine = db.set_up_db()
+        raw_block = var.block_a
+        block_hash = raw_block["hash"]
+        block_info, cb, txs, inputs, outputs = db._prepare_block_data(raw_block)
+
+        with Session(engine) as s:
+            db.insert_from_dict([block_info], db.Blocks, s)
+
+        pk = s.get(db.Blocks, block_hash)
+        assert pk is not None
 
 
 if __name__ == "__main__":

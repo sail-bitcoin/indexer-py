@@ -15,7 +15,6 @@ class Base(DeclarativeBase):
 
 
 load_dotenv()
-DEFAULT_SQLITE_URL = os.getenv("DB_URL")
 
 # ------------------------------------------------------------
 # DB Tables
@@ -101,7 +100,7 @@ class CoinbaseInputs(Base):
 # --------------
 def get_database_url() -> str:
     load_dotenv()
-    url = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
+    url = os.getenv("DB_URL")
     if url is None:
         raise ValueError("Database URL is not set.")
     return url
@@ -156,48 +155,36 @@ def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session)
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
     with context_manager.fail_on_error():
-        txs = block["tx"]
         block_hash = block["hash"]
-        cb = block["coinbase_tx"]
-
+        txs = []
         inputs = []
         outputs = []
-        coinbase_spending_txid = None
+        cb = {k: v for k, v in block["coinbase_tx"].items() if k not in COINBASETX_FIELDS_TO_EXCLUDE}
 
-        for k, tx in enumerate(txs):
+        for k, tx in enumerate(block["tx"]):
             # 1. Transactions
             txid = tx["txid"]
-            txs[k] = {**tx, "blockhash": block_hash, "n": k}
+            new_tx = {field: value for field, value in tx.items() if field not in TRANSACTION_FIELDS_TO_EXCLUDE}
+            new_tx["blockhash"] = block_hash
+            new_tx["n"] = k
 
             # 1. Inputs
-            for n, i in enumerate[Any](txs[k]["vin"]):
-                i["spending_txid"] = txid
-                i["n"] = n
-
+            for n, i in enumerate(tx["vin"]):
                 # 2. Coinbase
                 if k == 0 and n == 0 and "coinbase" in i:
-                    coinbase_spending_txid = txid
-                    cb = {**cb, "blockhash": block_hash, "spending_txid": coinbase_spending_txid}
+                    cb = {**cb, "blockhash": block_hash, "spending_txid": txid}
                     break  # first input of first block's tx is COINBASE not INPUTS
 
-                inputs.append(i)
+                inputs.append({**i, "spending_txid": txid, "n": n})
 
             # 3. Outputs
-            for o in txs[k]["vout"]:
-                o["spending_txid"] = txid
-                outputs.append(o)
+            for o in tx["vout"]:
+                outputs.append({**o, "spending_txid": txid})
 
-            # 4. Transactions clean up
-            for field in TRANSACTION_FIELDS_TO_EXCLUDE:
-                del txs[k][field]
+            txs.append(new_tx)
 
-        # 5. Blocks & CoinbaseInputs clean up
-        for field in BLOCK_FIELDS_TO_EXCLUDE:
-            del block[field]
-        for field in COINBASETX_FIELDS_TO_EXCLUDE:
-            del cb[field]
-
-        return block, cb, txs, inputs, outputs
+        new_block = {k: v for k, v in block.items() if k not in BLOCK_FIELDS_TO_EXCLUDE}
+        return new_block, cb, txs, inputs, outputs
 
 
 def insert_all(block: dict, engine: Engine):
