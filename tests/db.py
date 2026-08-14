@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from bitcoin_indexer import db
+import db
 import tests.variables as var
 
 

@@ -1,21 +1,24 @@
 from contextlib import contextmanager
-from requests import exceptions
+from json import JSONDecodeError
 from sqlalchemy.exc import IntegrityError
+import httpx
 
 from logger import logger
+from exceptions import RpcHTTPStatusError, BitcoinRpcError
 
 
 @contextmanager
-def fail_on_error():
+def fail_on_error(reraise=False):
     try:
         yield
-    except exceptions.HTTPError as e:
-        if e.response is not None:
-            logger.error("HTTPError %s: %s - %s", e.response.status_code, e.response.reason, e.response.text)
+    except (RpcHTTPStatusError, BitcoinRpcError, httpx.RequestError, httpx.HTTPError, httpx.InvalidURL, JSONDecodeError) as e:
+        attempts = getattr(e, "attempts", None)
+        if attempts:
+            logger.error("%s (after %d attempt(s))", e, attempts)
         else:
-            logger.error("HTTPError (no response): %s", e)
-    except (exceptions.RequestException, AttributeError) as e:
-        logger.error(e)
+            logger.error(e)
+        if reraise:
+            raise
 
 
 @contextmanager

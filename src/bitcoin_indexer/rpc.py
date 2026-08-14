@@ -1,86 +1,160 @@
 import hashlib
 import json
 import os
+from types import TracebackType
+from typing import NoReturn, Self, Any
 from pathlib import Path
+from aiolimiter import AsyncLimiter
+from tenacity import (
+    RetryCallState,
+    before_sleep_log,
+    retry,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    retry_if_exception,
+)
+from logging import WARNING
 
-import requests
+import httpx
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from requests.exceptions import HTTPError
-from urllib3.util import Retry
 
 from logger import logger
-import context_manager
+from exceptions import RpcHTTPStatusError, BitcoinRpcError
 
 
 RPC_CACHE_DIR = Path("var/rpc_cache")
+TIMEOUT_CONNECT = 10
+TIMEOUT_READ = 60
+TIMEOUT_WRITE = 10
+TIMEOUT_POOL = 10
+
+getblockhash_ratio = AsyncLimiter(6, 1.0)
+
+
+def should_retry(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, json.JSONDecodeError)):
+        return True
+    if isinstance(exc, RpcHTTPStatusError):
+        return exc.status_code == 429 or exc.status_code >= 500
+    if isinstance(exc, BitcoinRpcError):
+        return True
+    return False
+
+
+def _raise_outside_of_retry(retry_state: RetryCallState) -> NoReturn:
+    assert retry_state.outcome is not None
+    exc = retry_state.outcome.exception()
+    assert exc is not None
+    exc.attempts = retry_state.attempt_number  # type: ignore[attr-defined]
+    raise exc
 
 
 # ------------------------------------------------------------
-class GetBlockClient:
-    """Shared GetBlock JSON-RPC setup"""
+class RpcClient:
+    """Rpc Client JSON-RPC setup"""
 
-    def __init__(self):
+    def __init__(self, max_conn=15, max_conn_keepalive=15) -> None:
+        self.max_conn = max_conn
+        self.max_conn_keepalived = max_conn_keepalive
         self._headers = {"Content-Type": "application/json"}
-        self._payload = {"jsonrpc": "2.0", "id": "getblock.io"}
-        self._rpc_domain = "go.getblock.io"
+        self._payload = {"jsonrpc": "2.0", "id": 1}
         self._rpc_url = None
-        self._retries = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=[500, 502, 503, 504, 505],
-            allowed_methods=frozenset(["POST"]),  # API is RPC not REST
-        )
-        self._session = self._create_session()
+        self._session: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> Self:
+        await self._get_session()
+        return self
+
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc: Exception | None, tb: TracebackType | None) -> None:
+        await self._close_session()
+
+    async def _get_session(self) -> httpx.AsyncClient:
+        if self._session is None or self._session.is_closed:
+            # fmt: off
+            self._session = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=TIMEOUT_CONNECT, read=TIMEOUT_READ, write=TIMEOUT_WRITE, pool=TIMEOUT_POOL),
+                limits=httpx.Limits(
+                    max_connections=self.max_conn,
+                    max_keepalive_connections=self.max_conn_keepalived,
+                )
+            )
+        return self._session
+
+    async def _close_session(self) -> None:
+        if self._session and not self._session.is_closed:
+            await self._session.aclose()
+            self._session = None
 
     @property
     def rpc_url(self) -> str:
         if self._rpc_url is None:
             load_dotenv()
-            token = os.getenv("GETBLOCK_ACCESS_TOKEN")
-            if not token:
-                raise RuntimeError("Could not retrieve GetBlock Access Token — check .env file")
-            self._rpc_url = f"https://{self._rpc_domain}/{token}"
+            self._rpc_url = os.getenv("RPC_URL")
+            if not self._rpc_url:
+                raise RuntimeError("Could not retrieve RPC_URL — check .env file")
         return self._rpc_url
 
-    def _create_session(self) -> requests.Session:
-        s = requests.Session()
-        s.mount("https://", HTTPAdapter(max_retries=self._retries))
-        return s
-
-    def call_rpc(self, verb: str, method: str, params: list | None = None):
+    # fmt: off
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_exponential_jitter(initial=1, jitter=3, max=10),
+        retry_error_callback=_raise_outside_of_retry,
+        retry=retry_if_exception(should_retry),
+        before_sleep=before_sleep_log(logger, WARNING),
+    )
+    async def call_rpc(self, verb: str, method: str, params: list | None = None) -> Any:
+        if self._session is None:
+            raise RuntimeError("RpcClient must be used as `async with` for session lifecycle management.")
         cache_key = hashlib.sha256(f"{method}:{params}".encode()).hexdigest()
         cache_file = RPC_CACHE_DIR / f"{method}_{cache_key}.json"
         if cache_file.exists():
-            logger.info("Cache hit:  %s  with params: %s", method, params)
+            logger.info("Cache hit:  %s %s", method, params)
             return json.loads(cache_file.read_text())
 
         url = self.rpc_url
-        logger.info("Calling RPC:  %s  %s  with params: %s", verb, method, params)
+        logger.info("Calling RPC:  %s  %s %s", verb, method, params)
 
-        with context_manager.fail_on_error():
-            payload = json.dumps({**self._payload, "method": method, "params": params})
-            response = self._session.request(verb, url, headers=self._headers, data=payload)
-            if response.status_code != 200:
-                raise HTTPError(response=response)
+        payload = json.dumps({**self._payload, "method": method, "params": params})
+        if method == "getblockhash":
+            async with getblockhash_ratio:
+                response = await self._session.request(verb, url, headers=self._headers, content=payload)
+        else:
+            response = await self._session.request(verb, url, headers=self._headers, content=payload)
+        
+        if response.status_code != 200:
+            raise RpcHTTPStatusError(status_code=response.status_code, method=method, reason=response.reason_phrase, params=params)
 
-            logger.info("Request succeded.")
-            result = response.json()["result"]
+        resp = response.json()
+        if resp.get("error") is not None:
+            code = resp.get("error", {}).get("code")
+            message = resp.get("error", {}).get("message")
+            raise BitcoinRpcError(method, params, code=code, message=message)
+        if resp.get("result") is None:
+            raise BitcoinRpcError(method, params)
 
-            RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(result))
-            return result
+        logger.info("Request succeded.")
+        result = resp["result"]
+
+        RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(result))
+        return result
 
 
 # ------------------------------------------------------------
-class Blocks(GetBlockClient):
-    def get_block_hash(self, block_height: int):
-        return self.call_rpc("POST", "getblockhash", [block_height])
+class Blocks(RpcClient):
+    async def get_block_hash(self, block_height: int) -> Any:
+        response = await self.call_rpc("POST", "getblockhash", [block_height])
+        return response
 
-    def get_block(self, block_hash: str, verbosity: int = 1):
-        return self.call_rpc("POST", "getblock", [block_hash, verbosity])
+    async def get_lastblock(self) -> int:
+        response = await self.call_rpc("POST", "getblockcount", [])
+        return response
 
+    async def get_block(self, block_hash: str, verbosity: int = 2) -> Any:
+        response = await self.call_rpc("POST", "getblock", [block_hash, verbosity])
+        return response
 
-class NetworkInfo(GetBlockClient):
-    def get_blockchaininfo(self):
-        return self.call_rpc("POST", "getblockchaininfo", [])
+    async def get_block_from_height(self, height: int, verbosity: int = 2) -> Any:
+        hash = await self.get_block_hash(height)
+        response = await self.get_block(hash)
+        return response
