@@ -4,6 +4,9 @@ init-hook='import sys; sys.path.insert(0, "src/bitcoin_indexer")'
 [FORMAT]
 max-line-length=150
 
+[IMPORTS]
+known-third-party=db,logger,rpc,context_manager,benchmark,exceptions
+
 [MESSAGES CONTROL]
 disable=
     fixme,

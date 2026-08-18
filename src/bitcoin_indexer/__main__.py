@@ -17,20 +17,20 @@ SEMPAHORE_INCREASE = 30
 MAX_CONN = SEMAPHORE_INITIAL + SEMPAHORE_INCREASE
 MAX_CONN_KEEPALIVE = MAX_CONN
 
-hash_retrieved = 0
+HASH_RETRIEVED = 0
 getblock_semaphore = asyncio.Semaphore(SEMAPHORE_INITIAL)
 sqlite_lock = asyncio.Lock()
 
 
 async def process_block(b: rpc.Blocks, height: int, engine: Engine):
-    global hash_retrieved
+    global HASH_RETRIEVED
     block_hash = None
     block = None
     with fail_on_error():
         block_hash = await b.get_block_hash(height)
 
-        hash_retrieved += 1
-        if hash_retrieved == N_BLOCKS:
+        HASH_RETRIEVED += 1
+        if HASH_RETRIEVED == N_BLOCKS:
             for _ in range(SEMPAHORE_INCREASE):
                 getblock_semaphore.release()
 
@@ -49,8 +49,8 @@ async def main():
     e = db.set_up_db()
     async with rpc.Blocks(MAX_CONN, MAX_CONN_KEEPALIVE) as b:
         # fmt: off
-        await asyncio.gather(*[ 
-                process_block(b, h, e) 
+        await asyncio.gather(*[
+                process_block(b, h, e)
                 for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)
             ]
         )

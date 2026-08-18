@@ -4,6 +4,8 @@ import os
 from types import TracebackType
 from typing import NoReturn, Self, Any
 from pathlib import Path
+from logging import WARNING
+
 from aiolimiter import AsyncLimiter
 from tenacity import (
     RetryCallState,
@@ -13,7 +15,6 @@ from tenacity import (
     wait_exponential_jitter,
     retry_if_exception,
 )
-from logging import WARNING
 
 import httpx
 from dotenv import load_dotenv
@@ -120,7 +121,7 @@ class RpcClient:
                 response = await self._session.request(verb, url, headers=self._headers, content=payload)
         else:
             response = await self._session.request(verb, url, headers=self._headers, content=payload)
-        
+
         if response.status_code != 200:
             raise RpcHTTPStatusError(status_code=response.status_code, method=method, reason=response.reason_phrase, params=params)
 
@@ -155,6 +156,6 @@ class Blocks(RpcClient):
         return response
 
     async def get_block_from_height(self, height: int, verbosity: int = 2) -> Any:
-        hash = await self.get_block_hash(height)
-        response = await self.get_block(hash)
+        block_hash = await self.get_block_hash(height)
+        response = await self.get_block(block_hash, verbosity)
         return response
