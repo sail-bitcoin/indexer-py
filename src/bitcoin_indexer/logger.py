@@ -8,6 +8,8 @@ def setup_logging(name: str, filename: str = "var/output.log", level: int = logg
         level=level,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     return logging.getLogger(name)
 
 

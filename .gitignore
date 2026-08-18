@@ -3,3 +3,6 @@ var/
 src/bitcoin_indexer/__pycache__/
 tests/__pycache__/
 .vscode/
+.claude/
+CLAUDE.md
+benchmark/

@@ -1,3 +1,6 @@
-requests
 python-dotenv
 sqlalchemy>=2.0
+psutil
+httpx
+aiolimiter
+tenacity
