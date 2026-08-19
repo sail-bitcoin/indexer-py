@@ -1,8 +1,8 @@
 [MASTER]
-init-hook='import sys; sys.path.insert(0, "src/bitcoin_indexer")'
+init-hook='import sys; sys.path.insert(0, "benchmark"); sys.path.insert(0, "src/bitcoin_indexer")'
 
 [FORMAT]
-max-line-length=150
+max-line-length=250
 
 [IMPORTS]
 known-third-party=db,logger,rpc,context_manager,benchmark,exceptions
