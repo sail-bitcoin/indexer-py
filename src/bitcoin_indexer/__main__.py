@@ -1,11 +1,18 @@
 import asyncio
+import sys
+from pathlib import Path
+
 from sqlalchemy import Engine
 
-from benchmark import Recorder
+
 import db
 from logger import setup_logging
 import rpc
 from context_manager import fail_on_error
+
+# Recording wall clock and cpu time for the execution
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "benchmark"))
+from cpu_io import Recorder
 
 setup_logging(__name__)
 
