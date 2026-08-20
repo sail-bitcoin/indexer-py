@@ -1,6 +1,8 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
 import uvloop
 from sqlalchemy import Engine
@@ -44,7 +46,11 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
 
 
 async def main():
-    rec = Recorder(strategy="asyncio_uvloop", n_blocks=N_BLOCKS)
+    load_dotenv()
+    rec_prefix = os.getenv("RECORDER_PREFIX")
+    rec = None
+    if rec_prefix is not None:
+        rec = Recorder(strategy=rec_prefix, n_blocks=N_BLOCKS)
     e = db.set_up_db()
     sc = SemaphoreController(N_BLOCKS, SEMAPHORE_INITIAL, SEMPAHORE_INCREASE, MAX_CONN, MAX_CONN_KEEPALIVE)
     async with sc:
@@ -55,8 +61,9 @@ async def main():
             ]
         )
 
-    path = rec.save()
-    print(f"Saved benchmark to {path}")
+    if rec is not None:
+        path = rec.save()
+        print(f"Saved benchmark to {path}")
 
 
 if __name__ == "__main__":

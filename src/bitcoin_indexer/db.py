@@ -1,7 +1,7 @@
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect
+from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect, insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session
 
@@ -141,15 +141,7 @@ def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session)
         if not issubclass(table_class, Base):
             raise TypeError("table_class arg must be a subclass of Base.")
         logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
-        pk_name = inspect(table_class).primary_key[0].name
-        objects = []
-        for data in list_dict:
-            model = table_class(**data)
-            objects.append(model)
-            logger.debug("Inserting a representation of %s with PK %s={getattr(model, pk_name)}", table_class.__name__, pk_name)
-        s.add_all(objects)
-        s.commit()
-        logger.info("Insertion done.")
+        s.execute(insert(table_class), list_dict)
 
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
@@ -195,6 +187,7 @@ def insert_block(block: dict, engine: Engine):
         insert_from_dict(txs, Transactions, s)
         insert_from_dict(inputs, Inputs, s)
         insert_from_dict(outputs, Outputs, s)
+        s.commit()
         logger.info("Finished processing block %s.", block["height"])
 
 
