@@ -4,3 +4,4 @@ psutil
 httpx
 aiolimiter
 tenacity
+uvloop

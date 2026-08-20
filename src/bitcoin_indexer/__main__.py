@@ -2,6 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+import uvloop
 from sqlalchemy import Engine
 
 import db
@@ -43,7 +44,7 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
 
 
 async def main():
-    rec = Recorder(strategy="asyncio_semaphore", n_blocks=N_BLOCKS)
+    rec = Recorder(strategy="asyncio_uvloop", n_blocks=N_BLOCKS)
     e = db.set_up_db()
     sc = SemaphoreController(N_BLOCKS, SEMAPHORE_INITIAL, SEMPAHORE_INCREASE, MAX_CONN, MAX_CONN_KEEPALIVE)
     async with sc:
@@ -59,4 +60,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(), loop_factory=uvloop.new_event_loop)
