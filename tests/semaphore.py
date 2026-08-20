@@ -1,8 +1,8 @@
-# import asyncio
-# import pytest
+import pytest
 from unittest.mock import patch, AsyncMock
 
 from rpc import Blocks
+from exceptions import RpcHTTPStatusError
 from semaphore_controller import SemaphoreController
 
 BLOCK_HEIGHT = 878031
@@ -47,6 +47,31 @@ async def test_semaphore_increase_when_expected():
         # last call
         await sc.get_block_hash(BLOCK_HEIGHT)
 
+    assert sc.getblockhash_count == N_BLOCKS
+    assert sc.getblock_semaphore._value == (SEMAPHORE_INITIAL + SEMPAHORE_INCREASE)
+
+
+async def test_semaphore_increase_no_matter_the_result_of_get_block_hash_requests():
+    sc = SemaphoreController(N_BLOCKS, SEMAPHORE_INITIAL, SEMPAHORE_INCREASE, MAX_CONN, MAX_CONN_KEEPALIVE)
+    exc = RpcHTTPStatusError(status_code=429, reason="Too Many Requests", method="getblockhash")
+    first_half = N_BLOCKS // 2
+    second_half = (N_BLOCKS + 1) // 2
+    assert N_BLOCKS == first_half + second_half
+
+    # first half of the requests
+    for _ in range(first_half):
+        # succeed
+        with patch.object(Blocks, "get_block_hash", new_callable=AsyncMock, return_value="foo"):
+            await sc.get_block_hash(BLOCK_HEIGHT)
+
+    # second half
+    for _ in range(second_half):
+        # fail
+        with patch.object(Blocks, "get_block_hash", new_callable=AsyncMock, side_effect=exc):
+            with pytest.raises(RpcHTTPStatusError):
+                await sc.get_block_hash(BLOCK_HEIGHT)
+
+    # semaphore increased not matter the success or not of get_block_hash
     assert sc.getblockhash_count == N_BLOCKS
     assert sc.getblock_semaphore._value == (SEMAPHORE_INITIAL + SEMPAHORE_INCREASE)
 
