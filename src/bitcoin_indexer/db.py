@@ -137,6 +137,9 @@ def set_up_db() -> Engine:
 # Insertion
 # --------------
 def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session):
+    if not list_dict:
+        logger.info("No rows to insert for %s, skipping.", table_class.__name__)
+        return
     with context_manager.fail_on_db_insert_error(s):
         if not issubclass(table_class, Base):
             raise TypeError("table_class arg must be a subclass of Base.")
@@ -179,6 +182,9 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
 
 
 def insert_block(block: dict, engine: Engine):
+    if not block:
+        logger.error("Block dict empty, nothing to insert.")
+        return
     block_info, coinbase, txs, inputs, outputs = _prepare_block_data(block)
     logger.info("Adding Blocks height: %s and all it's transactions...", block["height"])
     with Session(engine) as s:
@@ -192,5 +198,8 @@ def insert_block(block: dict, engine: Engine):
 
 
 def insert_blocks(blocks: list[dict], engine: Engine):
+    if not blocks:
+        logger.error("Block list empty, nothing to insert.")
+        return
     for block in blocks:
         insert_block(block, engine)

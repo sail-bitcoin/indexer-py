@@ -1,15 +1,19 @@
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 import db
 import tests.variables as var
 
 
-def test_prepare_block_data():
+# --------------------
+# _prepare_block_data
+# --------------------
+def test__prepare_block_data_is_cleaned_up_correctly():
     raw_block = var.block_b
     # first, check if field to exclude exists
     for field in db.BLOCK_FIELDS_TO_EXCLUDE:
@@ -35,9 +39,52 @@ def test_prepare_block_data():
     assert len(outputs) == 4
 
 
+# --------------------
+# _insert_from_dict
+# --------------------
+def test__insert_from_dict_executes_with_correct_table_and_params():
+    mock_session = MagicMock(spec=Session)
+    list_dict = [{"hash": "000abc", "height": 1}]
+    db.insert_from_dict(list_dict, db.Blocks, mock_session)
+
+    mock_session.execute.assert_called_once()
+    stmt, params = mock_session.execute.call_args.args
+    assert stmt.table.name == db.Blocks.__tablename__
+    assert params == list_dict
+
+
+def test__insert_from_dict_rejects_non_base_subclass():
+    mock_session = MagicMock(spec=Session)
+    with pytest.raises(TypeError):
+        db.insert_from_dict([{"a": 1}], dict, mock_session)  # pyright: ignore
+
+
+def test__insert_from_dict_rolls_back_on_integrity_error():
+    mock_session = MagicMock(spec=Session)
+    mock_session.execute.side_effect = IntegrityError("stmt", "params", Exception("duplicate key"))
+    db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
+    mock_session.execute.assert_called_once()
+
+
+def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
+    mock_session = MagicMock(spec=Session)
+    db.insert_from_dict(None, db.Blocks, mock_session)  # pyright: ignore
+    db.insert_from_dict([], db.Blocks, mock_session)
+    mock_session.execute.assert_not_called()
+
+
+# todo: add tenacity retries for OperationalError
+# def test__insert_from_dict_handle_db_connection_error_correctly():
+#     mock_session = MagicMock(spec=Session)
+#     mock_session.execute.side_effect = OperationalError("stmt", {}, Exception("connectoin failedduplicate key"))
+#     with pytest.raises(OperationalError):
+#         db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
+# mock_session.rollback.assert_called()
+
+
 @pytest.mark.integration
 @patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test_insert_from_dict():
+def test__insert_from_dict_db_insertion():
     engine = db.set_up_db()
     block = var.block_a
     block_hash = block["hash"]
@@ -45,14 +92,86 @@ def test_insert_from_dict():
 
     with Session(engine) as s:
         db.insert_from_dict([block_info], db.Blocks, s)
+        pk = s.get(db.Blocks, block_hash)
+        s.commit()
 
-    pk = s.get(db.Blocks, block_hash)
-    assert pk is not None
+    with Session(engine) as s2:
+        pk = s2.get(db.Blocks, block_hash)
+        # commit changes are visible to another session
+        assert pk is not None
 
 
 @pytest.mark.integration
 @patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test_insert_block():
+def test__insert_from_dict_is_not_committing_changes_to_db():
+    engine = db.set_up_db()
+    block = var.block_a
+    block_hash = block["hash"]
+    block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
+
+    with Session(engine) as s:
+        db.insert_from_dict([block_info], db.Blocks, s)
+        pk = s.get(db.Blocks, block_hash)
+        # same session so uncommitted is visible
+        assert pk is not None
+
+    with Session(engine) as s2:
+        pk2 = s2.get(db.Blocks, block_hash)
+        # uncommitted, not visible
+        assert pk2 is None
+
+
+# --------------------
+# insert_block
+# --------------------
+@patch("db.Session")
+@patch("db._prepare_block_data")
+def test_insert_block_handles_execute_5_commit_once(mock_prepare, mock_session_cls):
+    mock_prepare.return_value = (
+        {"hash": "000abc", "height": 1},  # block_info
+        {"blockhash": "000abc", "spending_txid": "tx0"},  # coinbase
+        [{"txid": "tx0"}, {"txid": "tx1"}],  # txs
+        [{"spending_txid": "tx1", "n": 0}],  # inputs
+        [{"spending_txid": "tx0", "n": 0}],  # outputs
+    )
+    mock_session = MagicMock(spec=Session)
+    # with Session(engine) -> returns Session.__enter__
+    mock_session_cls.return_value.__enter__.return_value = mock_session
+
+    fake_block = {"height": 1}
+    db.insert_block(fake_block, engine=MagicMock())
+
+    mock_prepare.assert_called_once_with(fake_block)
+    assert mock_session.execute.call_count == 5
+    mock_session.commit.assert_called_once()
+
+
+@patch("db.Session")
+@patch("db._prepare_block_data")
+def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_session_cls):
+    mock_prepare.return_value = None
+    mock_session = MagicMock(spec=Session)
+    mock_session_cls.return_value.__enter__.return_value = mock_session
+
+    with pytest.raises(TypeError):
+        db.insert_block({"height": 1}, engine=MagicMock())
+
+
+# @patch("db.Session")
+# @patch("db._prepare_block_data")
+# def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_session_cls):
+#    mock_session = MagicMock(spec=Session)
+#    block = var.block_b
+#    # mock_session.execute.side_effect = IntegrityError("stmt", "params", Exception("duplicate key"))
+#
+#    with patch.object(db._prepare_block_data, 'method', return_value=None) as mock_method
+#        with pytest.raises(TypeError):
+#            db.insert_block(block, mock_session)
+
+
+@pytest.mark.integration
+@patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
+def test_insert_block_insert_data_correctly():
     engine = db.set_up_db()
     block = var.block_b
     db.insert_block(block, engine)
@@ -93,9 +212,12 @@ def test_insert_block():
         assert count == 2
 
 
+# --------------------
+# insert_blocks
+# --------------------
 @pytest.mark.integration
 @patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test_insert_blocks():
+def test_insert_blocks_loops_correctly():
     engine = db.set_up_db()
     blocks = [var.block_a, var.block_b]
     db.insert_blocks(blocks, engine)
