@@ -1,26 +1,25 @@
 import hashlib
 import json
 import os
-from types import TracebackType
-from typing import NoReturn, Self, Any
-from pathlib import Path
 from logging import WARNING
-
-from aiolimiter import AsyncLimiter
-from tenacity import (
-    RetryCallState,
-    before_sleep_log,
-    retry,
-    stop_after_attempt,
-    wait_exponential_jitter,
-    retry_if_exception,
-)
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Self
 
 import httpx
+from aiolimiter import AsyncLimiter
 from dotenv import load_dotenv
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
-from logger import logger
 from exceptions import RpcHTTPStatusError, BitcoinRpcError
+from logger import logger
+from utils import raise_outside_of_retry
 
 
 RPC_CACHE_DIR = Path("var/rpc_cache")
@@ -40,14 +39,6 @@ def should_retry(exc: BaseException) -> bool:
     if isinstance(exc, BitcoinRpcError):
         return True
     return False
-
-
-def _raise_outside_of_retry(retry_state: RetryCallState) -> NoReturn:
-    assert retry_state.outcome is not None
-    exc = retry_state.outcome.exception()
-    assert exc is not None
-    exc.attempts = retry_state.attempt_number  # type: ignore[attr-defined]
-    raise exc
 
 
 # ------------------------------------------------------------
@@ -99,7 +90,7 @@ class RpcClient:
     @retry(
         stop=stop_after_attempt(10),
         wait=wait_exponential_jitter(initial=1, jitter=3, max=10),
-        retry_error_callback=_raise_outside_of_retry,
+        retry_error_callback=raise_outside_of_retry,
         retry=retry_if_exception(should_retry),
         before_sleep=before_sleep_log(logger, WARNING),
     )

@@ -1,12 +1,22 @@
 import os
+from logging import WARNING
 
 from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect, insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 import context_manager
 from logger import logger
+from utils import raise_outside_of_retry
 
 
 class Base(DeclarativeBase):
@@ -14,6 +24,16 @@ class Base(DeclarativeBase):
 
 
 load_dotenv()
+
+
+def should_retry(exc: BaseException) -> bool:
+    if isinstance(
+        exc,
+        (IntegrityError, OperationalError),
+    ):
+        return True
+    return False
+
 
 # ------------------------------------------------------------
 # DB Tables
@@ -26,6 +46,8 @@ STALE_BLOCK_FIELDS = {"confirmations"}
 
 # what about "in_active_chain"?
 STALE_TRANSACTION_FIELDS = {"confirmations"}
+
+INSERTION_RETRIES = 4
 
 
 class Blocks(Base):
@@ -136,11 +158,18 @@ def set_up_db() -> Engine:
 # --------------
 # Insertion
 # --------------
+@retry(
+    stop=stop_after_attempt(INSERTION_RETRIES),
+    wait=wait_exponential_jitter(initial=1, jitter=1.5, max=10),
+    retry_error_callback=raise_outside_of_retry,
+    retry=retry_if_exception(should_retry),
+    before_sleep=before_sleep_log(logger, WARNING),
+)
 def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session):
     if not list_dict:
         logger.info("No rows to insert for %s, skipping.", table_class.__name__)
         return
-    with context_manager.fail_on_db_insert_error(s):
+    with context_manager.rollback_on_error(s):
         if not issubclass(table_class, Base):
             raise TypeError("table_class arg must be a subclass of Base.")
         logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)

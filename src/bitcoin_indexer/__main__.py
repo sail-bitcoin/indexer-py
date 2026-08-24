@@ -9,7 +9,7 @@ from sqlalchemy import Engine
 
 import db
 from logger import setup_logging
-from context_manager import fail_on_error
+from context_manager import fail_on_error, log_on_db_insert_error
 from semaphore_controller import SemaphoreController
 
 # Recording wall clock and cpu time for the execution
@@ -41,8 +41,9 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
 
     # TODO: sqlite can't handle concurent writing
     async with sqlite_lock:
-        if block is not None:
-            await asyncio.to_thread(db.insert_block, block, engine)
+        with log_on_db_insert_error():
+            if block is not None:
+                await asyncio.to_thread(db.insert_block, block, engine)
 
 
 async def main():
