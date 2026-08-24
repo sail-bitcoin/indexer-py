@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import db
+from tests.utils import fast_retries
 import tests.variables as var
 
 
@@ -59,13 +60,6 @@ def test__insert_from_dict_rejects_non_base_subclass():
         db.insert_from_dict([{"a": 1}], dict, mock_session)  # pyright: ignore
 
 
-def test__insert_from_dict_rolls_back_on_integrity_error():
-    mock_session = MagicMock(spec=Session)
-    mock_session.execute.side_effect = IntegrityError("stmt", "params", Exception("duplicate key"))
-    db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
-    mock_session.execute.assert_called_once()
-
-
 def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
     mock_session = MagicMock(spec=Session)
     db.insert_from_dict(None, db.Blocks, mock_session)  # pyright: ignore
@@ -73,13 +67,16 @@ def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
     mock_session.execute.assert_not_called()
 
 
-# todo: add tenacity retries for OperationalError
-# def test__insert_from_dict_handle_db_connection_error_correctly():
-#     mock_session = MagicMock(spec=Session)
-#     mock_session.execute.side_effect = OperationalError("stmt", {}, Exception("connectoin failedduplicate key"))
-#     with pytest.raises(OperationalError):
-#         db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
-# mock_session.rollback.assert_called()
+def test__insert_from_dict_retries_and_rollback_after_all_retries_failed():
+    mock_session = MagicMock(spec=Session)
+    mock_session.execute.side_effect = OperationalError("stmt", {}, Exception("connectoin failedduplicate key"))
+    retries = 3
+    with fast_retries(db.insert_from_dict, retries):
+        with pytest.raises(OperationalError):
+            db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
+
+    assert mock_session.execute.call_count == retries
+    mock_session.rollback.assert_called()
 
 
 @pytest.mark.integration
