@@ -3,3 +3,4 @@ respx
 pytest
 pytest-asyncio
 pylint
+testcontainers[postgres]

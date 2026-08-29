@@ -26,8 +26,6 @@ SEMPAHORE_INCREASE = 30
 MAX_CONN = SEMAPHORE_INITIAL + SEMPAHORE_INCREASE
 MAX_CONN_KEEPALIVE = MAX_CONN
 
-sqlite_lock = asyncio.Lock()
-
 
 async def process_block(sc: SemaphoreController, height: int, engine: Engine):
     block_hash = None
@@ -39,11 +37,9 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
             if block_hash is not None:
                 block = await sc.get_block(block_hash)
 
-    # TODO: sqlite can't handle concurent writing
-    async with sqlite_lock:
-        with log_on_db_insert_error():
-            if block is not None:
-                await asyncio.to_thread(db.insert_block, block, engine)
+    with log_on_db_insert_error():
+        if block is not None:
+            await asyncio.to_thread(db.insert_block, block, engine)
 
 
 async def main():

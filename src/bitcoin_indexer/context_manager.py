@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from json import JSONDecodeError
 
 import httpx
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 
 from exceptions import RpcHTTPStatusError, BitcoinRpcError
 from logger import logger
@@ -33,7 +33,7 @@ def fail_on_error(reraise=False):
 def log_on_db_insert_error():
     try:
         yield
-    except (IntegrityError, OperationalError) as e:
+    except SQLAlchemyError as e:
         logger.error({e})
     except TypeError as e:
         logger.error({e})
@@ -41,8 +41,5 @@ def log_on_db_insert_error():
 
 @contextmanager
 def rollback_on_error(session):
-    try:
+    with session.begin_nested():
         yield
-    except (IntegrityError, OperationalError):
-        session.rollback()
-        raise

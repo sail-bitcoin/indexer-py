@@ -1,4 +1,3 @@
-import os
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -67,7 +66,7 @@ def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
     mock_session.execute.assert_not_called()
 
 
-def test__insert_from_dict_retries_and_rollback_after_all_retries_failed():
+def test__insert_from_dict_retries_and_call_begin_nested_after_all_retries_failed():
     mock_session = MagicMock(spec=Session)
     mock_session.execute.side_effect = OperationalError("stmt", {}, Exception("connectoin failedduplicate key"))
     retries = 3
@@ -76,12 +75,11 @@ def test__insert_from_dict_retries_and_rollback_after_all_retries_failed():
             db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
 
     assert mock_session.execute.call_count == retries
-    mock_session.rollback.assert_called()
+    mock_session.begin_nested.assert_called()
 
 
 @pytest.mark.integration
-@patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test__insert_from_dict_db_insertion():
+def test__insert_from_dict_db_insertion(db_url):
     engine = db.set_up_db()
     block = var.block_a
     block_hash = block["hash"]
@@ -99,8 +97,7 @@ def test__insert_from_dict_db_insertion():
 
 
 @pytest.mark.integration
-@patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test__insert_from_dict_is_not_committing_changes_to_db():
+def test__insert_from_dict_is_not_committing_changes_to_db(db_url):
     engine = db.set_up_db()
     block = var.block_a
     block_hash = block["hash"]
@@ -167,8 +164,7 @@ def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_se
 
 
 @pytest.mark.integration
-@patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test_insert_block_insert_data_correctly():
+def test_insert_block_insert_data_correctly(db_url):
     engine = db.set_up_db()
     block = var.block_b
     db.insert_block(block, engine)
@@ -213,8 +209,7 @@ def test_insert_block_insert_data_correctly():
 # insert_blocks
 # --------------------
 @pytest.mark.integration
-@patch.dict(os.environ, {"DB_URL": "sqlite:///:memory:"}, clear=True)
-def test_insert_blocks_loops_correctly():
+def test_insert_blocks_loops_correctly(db_url):
     engine = db.set_up_db()
     blocks = [var.block_a, var.block_b]
     db.insert_blocks(blocks, engine)
