@@ -2,9 +2,9 @@ import os
 from logging import WARNING
 
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, Integer, String, create_engine, inspect, insert
+from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, BigInteger, Integer, String, create_engine, inspect, insert
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DisconnectionError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase, Session
 from tenacity import (
     before_sleep_log,
@@ -27,12 +27,7 @@ load_dotenv()
 
 
 def should_retry(exc: BaseException) -> bool:
-    if isinstance(
-        exc,
-        (IntegrityError, OperationalError),
-    ):
-        return True
-    return False
+    return isinstance(exc, (OperationalError, SATimeoutError, DisconnectionError))
 
 
 # ------------------------------------------------------------
@@ -63,7 +58,7 @@ class Blocks(Base):
     time = Column(Integer)
     mediantime = Column(Integer)
     confirmations = Column(Integer)
-    nonce = Column(Integer)
+    nonce = Column(BigInteger)
     bits = Column(String)
     difficulty = Column(Float)
     chainwork = Column(String)
@@ -82,7 +77,7 @@ class Transactions(Base):
     vsize = Column(Integer)
     weight = Column(Integer)
     version = Column(Integer)
-    locktime = Column(Integer)
+    locktime = Column(BigInteger)
     fee = Column(Integer)
     blockhash = Column(String, ForeignKey("blocks.hash"))
 
@@ -94,7 +89,7 @@ class Inputs(Base):
     txid = Column(String)
     vout = Column(Integer)
     scriptSig = Column(JSON)
-    sequence = Column(Integer)
+    sequence = Column(BigInteger)
     txinwitness = Column(JSON)
 
 
@@ -102,7 +97,7 @@ class Outputs(Base):
     __tablename__ = "outputs"
     spending_txid = Column(String, ForeignKey("transactions.txid"), primary_key=True)
     n = Column(Integer, primary_key=True)
-    value = Column(Integer)
+    value = Column(BigInteger)
     scriptPubKey = Column(JSON)
 
 
@@ -111,8 +106,8 @@ class CoinbaseInputs(Base):
     blockhash = Column(String, ForeignKey("blocks.hash"), primary_key=True)
     spending_txid = Column(String, ForeignKey("transactions.txid"))
     version = Column(Integer)
-    locktime = Column(Integer)
-    sequence = Column(Integer)
+    locktime = Column(BigInteger)
+    sequence = Column(BigInteger)
     coinbase = Column(String)
 
 
@@ -132,9 +127,6 @@ def create_db_engine(url: str | None = None):
         logger.info("Creating Database Engine at %s", url)
         url = url or get_database_url()
         connect_args = {}
-        if url.startswith("sqlite"):
-            # TODO: Required when the engine is shared across threads?
-            connect_args["check_same_thread"] = False
         logger.info("Database Engine created.")
         return create_engine(url, echo=False, hide_parameters=True, connect_args=connect_args)
 
@@ -218,8 +210,8 @@ def insert_block(block: dict, engine: Engine):
     logger.info("Adding Blocks height: %s and all it's transactions...", block["height"])
     with Session(engine) as s:
         insert_from_dict([block_info], Blocks, s)
-        insert_from_dict([coinbase], CoinbaseInputs, s)
         insert_from_dict(txs, Transactions, s)
+        insert_from_dict([coinbase], CoinbaseInputs, s)
         insert_from_dict(inputs, Inputs, s)
         insert_from_dict(outputs, Outputs, s)
         s.commit()
