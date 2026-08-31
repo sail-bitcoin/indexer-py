@@ -1,8 +1,9 @@
 import os
 from logging import WARNING
+from typing import cast
 
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, BigInteger, Integer, String, create_engine, inspect, insert
+from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, BigInteger, Integer, String, Table, create_engine, inspect, insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DisconnectionError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase, Session
@@ -165,7 +166,7 @@ def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session)
         if not issubclass(table_class, Base):
             raise TypeError("table_class arg must be a subclass of Base.")
         logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
-        s.execute(insert(table_class), list_dict)
+        s.execute(insert(cast(Table, table_class.__table__)), list_dict)
 
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
@@ -190,7 +191,8 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
                     cb = {**cb, "blockhash": block_hash, "spending_txid": txid}
                     break  # first input of first block's tx is COINBASE not INPUTS
 
-                inputs.append({**i, "spending_txid": txid, "n": n})
+                # txinwitness only present in Segwit inputs
+                inputs.append({"txinwitness": None, **i, "spending_txid": txid, "n": n})
 
             # 3. Outputs
             for o in tx["vout"]:
