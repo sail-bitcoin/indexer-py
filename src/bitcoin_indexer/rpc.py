@@ -1,12 +1,13 @@
 import hashlib
-import json
 import os
+from json import JSONDecodeError
 from logging import WARNING
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
 import httpx
+import orjson
 from aiolimiter import AsyncLimiter
 from dotenv import load_dotenv
 from tenacity import (
@@ -32,7 +33,7 @@ getblockhash_ratio = AsyncLimiter(6, 1.0)
 
 
 def should_retry(exc: BaseException) -> bool:
-    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, json.JSONDecodeError)):
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, JSONDecodeError)):
         return True
     if isinstance(exc, RpcHTTPStatusError):
         return exc.status_code == 429 or exc.status_code >= 500
@@ -101,12 +102,12 @@ class RpcClient:
         cache_file = RPC_CACHE_DIR / f"{method}_{cache_key}.json"
         if cache_file.exists():
             logger.info("Cache hit:  %s %s", method, params)
-            return json.loads(cache_file.read_text())
+            return orjson.loads(cache_file.read_bytes())
 
         url = self.rpc_url
         logger.info("Calling RPC:  %s  %s %s", verb, method, params)
 
-        payload = json.dumps({**self._payload, "method": method, "params": params})
+        payload = orjson.dumps({**self._payload, "method": method, "params": params})
         if method == "getblockhash":
             async with getblockhash_ratio:
                 response = await self._session.request(verb, url, headers=self._headers, content=payload)
@@ -116,7 +117,7 @@ class RpcClient:
         if response.status_code != 200:
             raise RpcHTTPStatusError(status_code=response.status_code, method=method, reason=response.reason_phrase, params=params)
 
-        resp = response.json()
+        resp = orjson.loads(response.content)
         if resp.get("error") is not None:
             code = resp.get("error", {}).get("code")
             message = resp.get("error", {}).get("message")
@@ -128,7 +129,7 @@ class RpcClient:
         result = resp["result"]
 
         RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(result))
+        cache_file.write_bytes(orjson.dumps(result))
         return result
 
 

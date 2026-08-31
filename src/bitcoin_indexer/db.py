@@ -2,6 +2,7 @@ import os
 from logging import WARNING
 from typing import cast
 
+import orjson
 from dotenv import load_dotenv
 from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, BigInteger, Integer, String, Table, create_engine, inspect, insert
 from sqlalchemy.engine import Engine
@@ -129,7 +130,13 @@ def create_db_engine(url: str | None = None):
         url = url or get_database_url()
         connect_args = {}
         logger.info("Database Engine created.")
-        return create_engine(url, echo=False, hide_parameters=True, connect_args=connect_args)
+        return create_engine(
+            url,
+            echo=False,
+            hide_parameters=True,
+            connect_args=connect_args,
+            json_serializer=lambda v: orjson.dumps(v).decode(),
+        )
 
 
 def create_tables(engine: Engine) -> None:

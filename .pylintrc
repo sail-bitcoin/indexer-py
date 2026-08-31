@@ -1,5 +1,6 @@
 [MASTER]
 init-hook='import sys; sys.path.insert(0, "benchmark"); sys.path.insert(0, "src/bitcoin_indexer")'
+extension-pkg-allow-list=orjson
 
 [FORMAT]
 max-line-length=250
