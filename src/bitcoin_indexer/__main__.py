@@ -64,4 +64,35 @@ async def main():
 
 
 if __name__ == "__main__":
+    # import yappi
+    # from datetime import timezone, datetime
+
+    # yappi.set_clock_type("cpu")
+    # yappi.start()
     asyncio.run(main(), loop_factory=uvloop.new_event_loop)
+    # yappi.stop()
+    #
+    # profile_dir = Path("./var/profiles")
+    # profile_dir.mkdir(parents=True, exist_ok=True)
+    # timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # prof_path = profile_dir / f"cpu_profile_{timestamp}.prof"
+    # txt_path = profile_dir / f"cpu_profile_{timestamp}.txt"
+    #
+    # stats = yappi.get_func_stats()
+    # stats.sort("tsub", "desc")  # self CPU time, excluding time spent in calls
+    # stats.save(str(prof_path), type="pstat")  # keep full paths for the .prof (e.g. loading via pstats)
+    # stats.strip_dirs()  # .txt only: drop venv path noise so names fit the "name" column
+    # with open(txt_path, "w") as f:
+    #     stats.print_all(
+    #         out=f,
+    #         limit=200,
+    #         columns={
+    #             0: ("name", 100),
+    #             1: ("ncall", 18),
+    #             2: ("tsub", 10),
+    #             3: ("ttot", 10),
+    #             4: ("tavg", 10),
+    #         },
+    #     )
+    #
+    # print(f"Saved profiler results to {prof_path}/.txt")

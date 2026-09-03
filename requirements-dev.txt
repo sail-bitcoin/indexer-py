@@ -4,3 +4,4 @@ pytest
 pytest-asyncio
 pylint
 testcontainers[postgres]
+yappi
