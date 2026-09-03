@@ -1,5 +1,4 @@
 import asyncio
-import builtins
 import os
 import sys
 from pathlib import Path
@@ -75,7 +74,7 @@ if __name__ == "__main__":
     #
     # profile_dir = Path("./var/profiles")
     # profile_dir.mkdir(parents=True, exist_ok=True)
-    # timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # timestamp = datetime.now(timezone.utc).strftime("%Y_%m_%d_T%H%M%SZ")
     # prof_path = profile_dir / f"cpu_profile_{timestamp}.prof"
     # txt_path = profile_dir / f"cpu_profile_{timestamp}.txt"
     #

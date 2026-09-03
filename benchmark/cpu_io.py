@@ -23,7 +23,7 @@ class Recorder:
 
     def save(self) -> Path:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        timestamp = datetime.now(timezone.utc).strftime("%Y_%m_%d_T%H%M%SZ")
         path = RESULTS_DIR / f"{self.strategy}_{self.n_blocks}_{timestamp}.json"
         total_wall = time.perf_counter() - self._start_wall
         total_cpu = time.process_time() - self._start_cpu

@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 
+import copy
 import pytest
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -14,7 +15,7 @@ import tests.variables as var
 # _prepare_block_data
 # --------------------
 def test__prepare_block_data_is_cleaned_up_correctly():
-    raw_block = var.block_b
+    raw_block = copy.deepcopy(var.block_b)
     # first, check if field to exclude exists
     for field in db.BLOCK_FIELDS_TO_EXCLUDE:
         assert field in raw_block
@@ -81,7 +82,7 @@ def test__insert_from_dict_retries_and_call_begin_nested_after_all_retries_faile
 @pytest.mark.integration
 def test__insert_from_dict_db_insertion(db_url):
     engine = db.set_up_db()
-    block = var.block_a
+    block = copy.deepcopy(var.block_a)
     block_hash = block["hash"]
     block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
 
@@ -99,7 +100,7 @@ def test__insert_from_dict_db_insertion(db_url):
 @pytest.mark.integration
 def test__insert_from_dict_is_not_committing_changes_to_db(db_url):
     engine = db.set_up_db()
-    block = var.block_a
+    block = copy.deepcopy(var.block_a)
     block_hash = block["hash"]
     block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
 
@@ -155,7 +156,7 @@ def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_se
 # @patch("db._prepare_block_data")
 # def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_session_cls):
 #    mock_session = MagicMock(spec=Session)
-#    block = var.block_b
+#    block = copy.deepcopy(var.block_b)
 #    # mock_session.execute.side_effect = IntegrityError("stmt", "params", Exception("duplicate key"))
 #
 #    with patch.object(db._prepare_block_data, 'method', return_value=None) as mock_method
@@ -166,8 +167,7 @@ def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_se
 @pytest.mark.integration
 def test_insert_block_insert_data_correctly(db_url):
     engine = db.set_up_db()
-    block = var.block_b
-    db.insert_block(block, engine)
+    block = copy.deepcopy(var.block_b)
 
     block_hash = block["hash"]
     txs = block["tx"]
@@ -176,6 +176,7 @@ def test_insert_block_insert_data_correctly(db_url):
     second_tx = txs[1]
     second_tx_id = second_tx["txid"]
 
+    db.insert_block(block, engine)
     with Session(engine) as s:
         # block
         block_pk = s.get(db.Blocks, block_hash)
@@ -211,7 +212,7 @@ def test_insert_block_insert_data_correctly(db_url):
 @pytest.mark.integration
 def test_insert_blocks_loops_correctly(db_url):
     engine = db.set_up_db()
-    blocks = [var.block_a, var.block_b]
+    blocks = copy.deepcopy([var.block_a, var.block_b])
     db.insert_blocks(blocks, engine)
 
     with Session(engine) as s:

@@ -80,7 +80,7 @@ def main():
     print(json.dumps(summary, indent=2))
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y_%m_%d_T%H%M%SZ")
     path = RESULTS_DIR / f"{rpc_host}_{N_BLOCKS}_{timestamp}.json"
     path.write_text(json.dumps(summary, indent=2))
     print(f"Saved to {path}")

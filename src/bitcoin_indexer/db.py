@@ -182,33 +182,43 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
         txs = []
         inputs = []
         outputs = []
-        cb = {k: v for k, v in block["coinbase_tx"].items() if k not in COINBASETX_FIELDS_TO_EXCLUDE}
+        cb = block["coinbase_tx"]
+        for field in COINBASETX_FIELDS_TO_EXCLUDE:
+            cb.pop(field, None)
 
         for k, tx in enumerate(block["tx"]):
             # 1. Transactions
             txid = tx["txid"]
-            new_tx = {field: value for field, value in tx.items() if field not in TRANSACTION_FIELDS_TO_EXCLUDE}
-            new_tx["blockhash"] = block_hash
-            new_tx["n"] = k
+            vin = tx.pop("vin")
+            vout = tx.pop("vout")
+            tx["blockhash"] = block_hash
+            tx["n"] = k
 
             # 1. Inputs
-            for n, i in enumerate(tx["vin"]):
+            for n, i in enumerate(vin):
                 # 2. Coinbase
                 if k == 0 and n == 0 and "coinbase" in i:
-                    cb = {**cb, "blockhash": block_hash, "spending_txid": txid}
+                    cb["blockhash"] = block_hash
+                    cb["spending_txid"] = txid
                     break  # first input of first block's tx is COINBASE not INPUTS
 
+                i["spending_txid"] = txid
+                i["n"] = n
                 # txinwitness only present in Segwit inputs
-                inputs.append({"txinwitness": None, **i, "spending_txid": txid, "n": n})
+                if "txinwitness" not in i:
+                    i["txinwitness"] = None
+                inputs.append(i)
 
             # 3. Outputs
-            for o in tx["vout"]:
-                outputs.append({**o, "spending_txid": txid})
+            for o in vout:
+                o["spending_txid"] = txid
+                outputs.append(o)
 
-            txs.append(new_tx)
+            txs.append(tx)
 
-        new_block = {k: v for k, v in block.items() if k not in BLOCK_FIELDS_TO_EXCLUDE}
-        return new_block, cb, txs, inputs, outputs
+        for field in BLOCK_FIELDS_TO_EXCLUDE:
+            block.pop(field, None)
+        return block, cb, txs, inputs, outputs
 
 
 def insert_block(block: dict, engine: Engine):
