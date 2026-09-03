@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 import uvloop
+import simdjson
 from sqlalchemy import Engine
 
 import db
@@ -31,15 +32,17 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
     block_hash = None
     block = None
     with fail_on_error():
-        block_hash = await sc.get_block_hash(height)
+        parser = simdjson.Parser()
+        block_hash = await sc.get_block_hash(height, parser=parser)
 
         async with sc.getblock_semaphore:
             if block_hash is not None:
-                block = await sc.get_block(block_hash)
+                block = await sc.get_block(block_hash, parser=parser)
 
     with log_on_db_insert_error():
         if block is not None:
-            await asyncio.to_thread(db.insert_block, block, engine)
+            # TODO: args both dict and raw obj
+            await asyncio.to_thread(db.insert_block, block, engine, parser)
 
 
 async def main():

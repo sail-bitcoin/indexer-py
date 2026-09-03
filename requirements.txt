@@ -7,3 +7,4 @@ tenacity
 uvloop
 psycopg2-binary
 orjson
+pysimdjson

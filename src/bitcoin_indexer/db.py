@@ -1,6 +1,6 @@
 import os
 from logging import WARNING
-from typing import cast
+from typing import cast, Union
 
 import orjson
 from dotenv import load_dotenv
@@ -8,6 +8,7 @@ from sqlalchemy import JSON, Boolean, Column, Float, ForeignKey, BigInteger, Int
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DisconnectionError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase, Session
+import simdjson
 from tenacity import (
     before_sleep_log,
     retry,
@@ -38,7 +39,8 @@ def should_retry(exc: BaseException) -> bool:
 BLOCK_FIELDS_TO_EXCLUDE = ["tx", "nextblockhash", "target", "coinbase_tx"]
 TRANSACTION_FIELDS_TO_EXCLUDE = ["vin", "vout"]
 COINBASETX_FIELDS_TO_EXCLUDE = ["witness"]
-
+INPUTS_JSON_COLUMNS = ["scriptSig", "txinwitness"]
+OUTPUTS_JSON_COLUMNS = ["scriptPubkey"]
 STALE_BLOCK_FIELDS = {"confirmations"}
 
 # what about "in_active_chain"?
@@ -99,7 +101,7 @@ class Outputs(Base):
     __tablename__ = "outputs"
     spending_txid = Column(String, ForeignKey("transactions.txid"), primary_key=True)
     n = Column(Integer, primary_key=True)
-    value = Column(BigInteger)
+    value = Column(BigInteger)  # TODO: biginteger or decimal? is biginteger acurrate on decimals?
     scriptPubKey = Column(JSON)
 
 
@@ -173,37 +175,65 @@ def insert_from_dict(list_dict: list[dict], table_class: type[Base], s: Session)
         if not issubclass(table_class, Base):
             raise TypeError("table_class arg must be a subclass of Base.")
         logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
+        # TODO: block_dict["script_sig"] = orjson.RawJSON(vin["scriptSig"].mini.encode())
+        # --> it should not serialize the scriptSig column and sqlalchemy should accept it
         s.execute(insert(cast(Table, table_class.__table__)), list_dict)
 
 
-def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
+def _extract_nested_json(block: Union[str, simdjson.Object]):
     with context_manager.fail_on_error():
-        block_hash = block["hash"]
+        # inputs.scriptSig / txinwitness outputs.scriptPubkey
+        print()
+
+
+# TODO: pattern idea:
+# [x] rpc.call_rpc return just the already-parsed raw str (error are handles with simdjson)
+# [ ] column(json) key-values are extracted AND removed to variables to be kepts as raw str
+# [ ] the leftover block var is deserialized into a dict and _prepared
+# [ ] we insert backt the serialize data into the dict with orjson.RawJSON (see insert_block)
+def _prepare_block_data(block: simdjson.Object, parser: simdjson.Parser) -> tuple[dict, dict, list, list, list]:
+    with context_manager.fail_on_error():
+        block_hash = block.get("hash")
         txs = []
         inputs = []
         outputs = []
-        cb = {k: v for k, v in block["coinbase_tx"].items() if k not in COINBASETX_FIELDS_TO_EXCLUDE}
+        cb = {k: v for k, v in block.get("coinbase_tx").items() if k not in COINBASETX_FIELDS_TO_EXCLUDE}
 
-        for k, tx in enumerate(block["tx"]):
+        for k, tx in enumerate(block.get("tx")):
             # 1. Transactions
-            txid = tx["txid"]
+            txid = tx.get("txid")
             new_tx = {field: value for field, value in tx.items() if field not in TRANSACTION_FIELDS_TO_EXCLUDE}
             new_tx["blockhash"] = block_hash
             new_tx["n"] = k
 
             # 1. Inputs
-            for n, i in enumerate(tx["vin"]):
+            for n, i in enumerate(tx.get("vin")):
                 # 2. Coinbase
                 if k == 0 and n == 0 and "coinbase" in i:
                     cb = {**cb, "blockhash": block_hash, "spending_txid": txid}
                     break  # first input of first block's tx is COINBASE not INPUTS
 
-                # txinwitness only present in Segwit inputs
-                inputs.append({"txinwitness": None, **i, "spending_txid": txid, "n": n})
+                # TODO: add a test for before segwit (txinwitness = None) to try if it handle non-segwit well
+                scriptsig = i.get("scriptSig")
+                txinwitness = i.get("txinwitness")
+                # fmt: off
+                inputs.append({
+                    **{key: val for key, val in i.items() if key not in INPUTS_JSON_COLUMNS},
+                    "scriptSig": orjson.Fragment(scriptsig.mini) if scriptsig is not None else None,
+                    "txinwitness": orjson.Fragment(txinwitness.mini) if txinwitness is not None else None,
+                    "spending_txid": txid,
+                    "n": n
+                })
 
             # 3. Outputs
             for o in tx["vout"]:
-                outputs.append({**o, "spending_txid": txid})
+                script_pubkey = o.get("scriptPubkey")
+                # fmt: off
+                outputs.append({
+                    **{key: val for key, val in o.items() if key not in OUTPUTS_JSON_COLUMNS}, 
+                    "scriptPubkey": orjson.Fragment(script_pubkey.mini) if script_pubkey is not None else None,
+                    "spending_txid": txid
+                })
 
             txs.append(new_tx)
 
@@ -211,11 +241,11 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
         return new_block, cb, txs, inputs, outputs
 
 
-def insert_block(block: dict, engine: Engine):
+def insert_block(block: simdjson.Object, engine: Engine, parser: simdjson.Parser):
     if not block:
         logger.error("Block dict empty, nothing to insert.")
         return
-    block_info, coinbase, txs, inputs, outputs = _prepare_block_data(block)
+    block_info, coinbase, txs, inputs, outputs = _prepare_block_data(block, parser=parser)
     logger.info("Adding Blocks height: %s and all it's transactions...", block["height"])
     with Session(engine) as s:
         insert_from_dict([block_info], Blocks, s)
@@ -227,9 +257,9 @@ def insert_block(block: dict, engine: Engine):
         logger.info("Finished processing block %s.", block["height"])
 
 
-def insert_blocks(blocks: list[dict], engine: Engine):
+def insert_blocks(blocks: list[simdjson.Object], engine: Engine, parser: simdjson.Parser):
     if not blocks:
         logger.error("Block list empty, nothing to insert.")
         return
     for block in blocks:
-        insert_block(block, engine)
+        insert_block(block, engine, parser)

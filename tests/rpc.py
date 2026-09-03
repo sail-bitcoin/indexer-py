@@ -7,6 +7,7 @@ from contextlib import contextmanager
 
 import httpx
 import respx
+import symdjson
 from aiolimiter import AsyncLimiter
 from tenacity import stop_after_attempt, wait_none
 
@@ -172,7 +173,7 @@ async def test_call_rpc_retries_on_429_RpcHTTPStatusError():
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
-                    return_value = httpx.Response(429,json={})
+                    return_value = httpx.Response(429,json={"foo": "bar"})
                 )
                 with pytest.raises(RpcHTTPStatusError):
                     await r.call_rpc(VERB, METHOD, PARAMS)

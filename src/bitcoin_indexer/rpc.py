@@ -1,3 +1,4 @@
+import time  # TODO
 import hashlib
 import os
 from json import JSONDecodeError
@@ -17,6 +18,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential_jitter,
 )
+import simdjson
 
 from exceptions import RpcHTTPStatusError, BitcoinRpcError
 from logger import logger
@@ -95,7 +97,7 @@ class RpcClient:
         retry=retry_if_exception(should_retry),
         before_sleep=before_sleep_log(logger, WARNING),
     )
-    async def call_rpc(self, verb: str, method: str, params: list | None = None) -> Any:
+    async def call_rpc(self, parser: simdjson.Parser, verb: str, method: str, params: list | None = None) -> Any:
         if self._session is None:
             raise RuntimeError("RpcClient must be used as `async with` for session lifecycle management.")
         cache_key = hashlib.sha256(f"{method}:{params}".encode()).hexdigest()
@@ -110,44 +112,61 @@ class RpcClient:
         payload = orjson.dumps({**self._payload, "method": method, "params": params})
         if method == "getblockhash":
             async with getblockhash_ratio:
-                response = await self._session.request(verb, url, headers=self._headers, content=payload)
+                resp_raw = await self._session.request(verb, url, headers=self._headers, content=payload)
         else:
-            response = await self._session.request(verb, url, headers=self._headers, content=payload)
+            resp_raw = await self._session.request(verb, url, headers=self._headers, content=payload)
 
-        if response.status_code != 200:
-            raise RpcHTTPStatusError(status_code=response.status_code, method=method, reason=response.reason_phrase, params=params)
+        parsed_resp_raw = parser.parse(resp_raw.content)
+        if resp_raw.status_code != 200:
+            raise RpcHTTPStatusError(status_code=resp_raw.status_code, method=method, reason=resp_raw.reason_phrase, params=params)
 
-        resp = orjson.loads(response.content)
-        if resp.get("error") is not None:
-            code = resp.get("error", {}).get("code")
-            message = resp.get("error", {}).get("message")
+
+        # TODO: timing loads vs raw parsing for a block:
+        # orjson loads: 31.600ms
+        # simdjson parsing: 17.930ms
+        # t = time.perf_counter()
+        # resp = orjson.loads(resp_raw.content)
+        # print(f"orjson loads: {(time.perf_counter() - t)*1000:.3f}ms")
+        # t = time.perf_counter()
+        #parsed_resp_raw = parser.parse(resp_raw.content)
+        # print(f"simdjson parsing: {(time.perf_counter() - t)*1000:.3f}ms")
+
+        #TODO:
+        # - stop deserializing here, just handle simdjson parsed raw, handle errors and return it. deserializing will happend in db.insert_from_dict
+        #       ---> require the parser to be defined at the module/file level, not the class!!!!
+        if parsed_resp_raw.get("error") is not None:
+            code = parsed_resp_raw.get("error", {}).get("code")
+            message = parsed_resp_raw.get("error", {}).get("message")
             raise BitcoinRpcError(method, params, code=code, message=message)
-        if resp.get("result") is None:
+        if parsed_resp_raw.get("result") is None:
             raise BitcoinRpcError(method, params)
 
         logger.info("Request succeded.")
-        result = resp["result"]
+        parsed_result_raw = parsed_resp_raw.get("result")
 
-        RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(orjson.dumps(result))
-        return result
+        # TODO: remove caching
+        # RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        # cache_file.write_bytes(orjson.dumps(result))
+
+        #TODO: see todo above, what should we return?
+        return parsed_result_raw
 
 
 # ------------------------------------------------------------
 class Blocks(RpcClient):
-    async def get_block_hash(self, block_height: int) -> Any:
-        response = await self.call_rpc("POST", "getblockhash", [block_height])
-        return response
+    async def get_block_hash(self, block_height: int, parser: simdjson.Parser) -> Any:
+        res = await self.call_rpc(parser, "POST", "getblockhash", [block_height])
+        return res
 
-    async def get_lastblock(self) -> int:
-        response = await self.call_rpc("POST", "getblockcount", [])
-        return response
+    async def get_lastblock(self, parser: simdjson.Parser) -> int:
+        res = await self.call_rpc(parser, "POST", "getblockcount", [])
+        return res
 
-    async def get_block(self, block_hash: str, verbosity: int = 2) -> Any:
-        response = await self.call_rpc("POST", "getblock", [block_hash, verbosity])
-        return response
+    async def get_block(self, block_hash: str, parser: simdjson.Parser, verbosity: int = 2) -> Any:
+        res = await self.call_rpc(parser, "POST", "getblock", [block_hash, verbosity])
+        return res
 
-    async def get_block_from_height(self, height: int, verbosity: int = 2) -> Any:
-        block_hash = await self.get_block_hash(height)
-        response = await self.get_block(block_hash, verbosity)
-        return response
+    async def get_block_from_height(self, height: int, parser: simdjson.Parser, verbosity: int = 2) -> Any:
+        block_hash = await self.get_block_hash(height, parser=parser)
+        res = await self.get_block(block_hash, verbosity=verbosity, parser=parser)
+        return res
