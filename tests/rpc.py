@@ -1,6 +1,4 @@
 import os
-import pathlib
-import tempfile
 import json
 from unittest.mock import patch
 from contextlib import contextmanager
@@ -8,7 +6,6 @@ from contextlib import contextmanager
 import httpx
 import respx
 from aiolimiter import AsyncLimiter
-from tenacity import stop_after_attempt, wait_none
 
 import pytest
 
@@ -28,14 +25,12 @@ CACHE_FILE_NAME = "getblockhash_b14e2493ac3bef439b9f3941d853b79c4bc11fff7c5244ac
 
 
 @contextmanager
-def prepare_rpc_call_cache_dir(mock_url="http://foo.com/bar"):
+def prepare_call_rpc(mock_url="http://foo.com/bar"):
     with (
-        tempfile.TemporaryDirectory() as tmp_dir,
-        patch.object(rpc, "RPC_CACHE_DIR", pathlib.Path(tmp_dir)),
         patch.object(rpc, "getblockhash_ratio", AsyncLimiter(15, 1.0)),
         patch.dict(os.environ, {"RPC_URL": mock_url}, clear=True),
     ):
-        yield pathlib.Path(tmp_dir)
+        yield
 
 
 # -----------
@@ -126,7 +121,7 @@ async def test_call_rpc():
 
 async def test_call_rpc_without_async_with():
     r = rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE)
-    with prepare_rpc_call_cache_dir():
+    with prepare_call_rpc():
         with respx.mock:
             # fmt: off
             route = respx.post(r.rpc_url).mock(
@@ -137,9 +132,9 @@ async def test_call_rpc_without_async_with():
             assert route.call_count == 0
 
 
-async def test_call_rpc_cache_no_cache_200():
+async def test_call_rpc_200():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             with respx.mock:
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
@@ -150,24 +145,9 @@ async def test_call_rpc_cache_no_cache_200():
             assert route.called
 
 
-async def test_call_rpc_local_cache_hit_200():
-    async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
-            cache_file = rpc.RPC_CACHE_DIR / CACHE_FILE_NAME
-            cache_file.write_text(json.dumps(BLOCK_HASH))
-            with respx.mock:
-                # fmt: off
-                route = respx.post(r.rpc_url).mock(
-                    return_value = httpx.Response(200,json={"result": "fake"})
-                )
-                result = await r.call_rpc(VERB, METHOD, PARAMS)
-            assert result == BLOCK_HASH
-            assert not route.called
-
-
 async def test_call_rpc_retries_on_429_RpcHTTPStatusError():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -181,7 +161,7 @@ async def test_call_rpc_retries_on_429_RpcHTTPStatusError():
 
 async def test_call_rpc_retries_on_500_RpcHTTPStatusError():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -195,7 +175,7 @@ async def test_call_rpc_retries_on_500_RpcHTTPStatusError():
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_with_code_message():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -209,7 +189,7 @@ async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_with_code_
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_without_code_message():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -223,7 +203,7 @@ async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_without_co
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_result_both_none():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -237,7 +217,7 @@ async def test_call_rpc_retries_on_200_BitcoinRpcError_error_result_both_none():
 
 async def test_call_rpc_should_not_retry_on_403():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             retries = 3
             with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
                 # fmt: off
@@ -311,7 +291,7 @@ async def test_should_retry_RpcHTTPStatusError_503_yes():
 # -----------
 async def test_blocks_rpc_call_wrapper():
     async with rpc.Blocks(MAX_CONN, MAX_CONN_KEEPALIVE) as b:
-        with prepare_rpc_call_cache_dir():
+        with prepare_call_rpc():
             with respx.mock:
                 # fmt: off
                 route = respx.post(b.rpc_url).mock(

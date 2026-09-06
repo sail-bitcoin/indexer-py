@@ -1,8 +1,6 @@
-import hashlib
 import os
 from json import JSONDecodeError
 from logging import WARNING
-from pathlib import Path
 from types import TracebackType
 from typing import Any, Self
 
@@ -23,7 +21,6 @@ from logger import logger
 from utils import raise_outside_of_retry
 
 
-RPC_CACHE_DIR = Path("var/rpc_cache")
 TIMEOUT_CONNECT = 10
 TIMEOUT_READ = 60
 TIMEOUT_WRITE = 10
@@ -98,11 +95,6 @@ class RpcClient:
     async def call_rpc(self, verb: str, method: str, params: list | None = None) -> Any:
         if self._session is None:
             raise RuntimeError("RpcClient must be used as `async with` for session lifecycle management.")
-        cache_key = hashlib.sha256(f"{method}:{params}".encode()).hexdigest()
-        cache_file = RPC_CACHE_DIR / f"{method}_{cache_key}.json"
-        if cache_file.exists():
-            logger.info("Cache hit:  %s %s", method, params)
-            return orjson.loads(cache_file.read_bytes())
 
         url = self.rpc_url
         logger.info("Calling RPC:  %s  %s %s", verb, method, params)
@@ -128,8 +120,6 @@ class RpcClient:
         logger.info("Request succeded.")
         result = resp["result"]
 
-        RPC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file.write_bytes(orjson.dumps(result))
         return result
 
 
