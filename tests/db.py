@@ -1,4 +1,5 @@
 from unittest.mock import patch, MagicMock
+from decimal import Decimal
 
 import copy
 import pytest
@@ -38,6 +39,14 @@ def test__prepare_block_data_is_cleaned_up_correctly():
     assert len(txs) == 2
     assert len(inputs) == (len(txs) - 1)  # tx[0]["vin"] is coinbase not input
     assert len(outputs) == 4
+
+
+def test__prepare_block_data_convert_output_value_to_sats():
+    b = copy.deepcopy(var.block_a)
+    value_btc = Decimal(b["tx"][0]["vout"][0]["value"])
+    value_stats = int(Decimal(value_btc * 10**8))
+    block, cb, txs, inputs, outputs = db._prepare_block_data(b)
+    assert outputs[0]["value"] == value_stats
 
 
 # --------------------

@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal
 from logging import WARNING
 from typing import cast
 
@@ -38,12 +39,8 @@ def should_retry(exc: BaseException) -> bool:
 BLOCK_FIELDS_TO_EXCLUDE = ["tx", "nextblockhash", "target", "coinbase_tx"]
 TRANSACTION_FIELDS_TO_EXCLUDE = ["vin", "vout"]
 COINBASETX_FIELDS_TO_EXCLUDE = ["witness"]
-
 STALE_BLOCK_FIELDS = {"confirmations"}
-
-# what about "in_active_chain"?
 STALE_TRANSACTION_FIELDS = {"confirmations"}
-
 INSERTION_RETRIES = 4
 
 
@@ -212,6 +209,8 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
             # 3. Outputs
             for o in vout:
                 o["spending_txid"] = txid
+                sats = int(Decimal(o["value"] * 10**8))
+                o["value"] = sats
                 outputs.append(o)
 
             txs.append(tx)

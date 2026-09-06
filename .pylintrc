@@ -12,6 +12,7 @@ known-third-party=db,logger,rpc,context_manager,benchmark,exceptions
 disable=
     fixme,
     too-few-public-methods,
+    too-many-locals,
     missing-class-docstring,
     missing-module-docstring,
     missing-function-docstring,
