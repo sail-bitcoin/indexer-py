@@ -176,7 +176,7 @@ def create_db_engine(url: str | None = None):
     with context_manager.fail_on_error():
         logger.info("Creating Database Engine at %s", url)
         url = url or get_database_url()
-        connect_args = {}
+        connect_args = {"options": "-c synchronous_commit=off"}
         logger.info("Database Engine created.")
         return create_engine(
             url,
