@@ -37,5 +37,5 @@ def clean_tables(request):
         return
     engine = db.create_db_engine(url)
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE blocks, transactions, inputs, outputs, coinbaseinputs CASCADE"))
+        conn.execute(text("DROP TABLE IF EXISTS blocks, transactions, inputs, outputs, coinbaseinputs CASCADE"))
     engine.dispose()

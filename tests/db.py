@@ -1,9 +1,10 @@
+from math import e
 from unittest.mock import patch, MagicMock
 from decimal import Decimal
 
 import copy
 import pytest
-from sqlalchemy import select, func
+from sqlalchemy import Connection, Engine, select, func, text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -76,18 +77,6 @@ def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
     mock_session.execute.assert_not_called()
 
 
-def test__insert_from_dict_retries_and_call_begin_nested_after_all_retries_failed():
-    mock_session = MagicMock(spec=Session)
-    mock_session.execute.side_effect = OperationalError("stmt", {}, Exception("connectoin failedduplicate key"))
-    retries = 3
-    with fast_retries(db.insert_from_dict, retries):
-        with pytest.raises(OperationalError):
-            db.insert_from_dict([{"hash": "00abc"}], db.Blocks, mock_session)
-
-    assert mock_session.execute.call_count == retries
-    mock_session.begin_nested.assert_called()
-
-
 @pytest.mark.integration
 def test__insert_from_dict_db_insertion(db_url):
     engine = db.set_up_db()
@@ -128,9 +117,8 @@ def test__insert_from_dict_is_not_committing_changes_to_db(db_url):
 # --------------------
 # insert_block
 # --------------------
-@patch("db.Session")
 @patch("db._prepare_block_data")
-def test_insert_block_handles_execute_5_commit_once(mock_prepare, mock_session_cls):
+def test_insert_block_handles_execute_5_times_and_commit_once(mock_prepare):
     mock_prepare.return_value = (
         {"hash": "000abc", "height": 1},  # block_info
         {"blockhash": "000abc", "spending_txid": "tx0"},  # coinbase
@@ -138,39 +126,25 @@ def test_insert_block_handles_execute_5_commit_once(mock_prepare, mock_session_c
         [{"spending_txid": "tx1", "n": 0}],  # inputs
         [{"spending_txid": "tx0", "n": 0}],  # outputs
     )
-    mock_session = MagicMock(spec=Session)
-    # with Session(engine) -> returns Session.__enter__
-    mock_session_cls.return_value.__enter__.return_value = mock_session
+    e = MagicMock(spec=Engine)
+    # with e.connect() as conn --> conn is the returned value of e.connect.__enter__()
+    conn = e.connect.return_value.__enter__.return_value
 
     fake_block = {"height": 1}
-    db.insert_block(fake_block, engine=MagicMock())
+    db.insert_block(fake_block, e=e)
 
     mock_prepare.assert_called_once_with(fake_block)
-    assert mock_session.execute.call_count == 5
-    mock_session.commit.assert_called_once()
+    assert conn.execute.call_count == 5
+    conn.commit.assert_called_once()
 
 
-@patch("db.Session")
 @patch("db._prepare_block_data")
-def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_session_cls):
+def test_insert_block_handles__prepare_block_data_failures(mock_prepare):
     mock_prepare.return_value = None
-    mock_session = MagicMock(spec=Session)
-    mock_session_cls.return_value.__enter__.return_value = mock_session
+    engine = MagicMock(spec=Engine)
 
     with pytest.raises(TypeError):
-        db.insert_block({"height": 1}, engine=MagicMock())
-
-
-# @patch("db.Session")
-# @patch("db._prepare_block_data")
-# def test_insert_block_handles__prepare_block_data_failures(mock_prepare, mock_session_cls):
-#    mock_session = MagicMock(spec=Session)
-#    block = copy.deepcopy(var.block_b)
-#    # mock_session.execute.side_effect = IntegrityError("stmt", "params", Exception("duplicate key"))
-#
-#    with patch.object(db._prepare_block_data, 'method', return_value=None) as mock_method
-#        with pytest.raises(TypeError):
-#            db.insert_block(block, mock_session)
+        db.insert_block({"height": 1}, e=engine)
 
 
 @pytest.mark.integration
@@ -186,6 +160,7 @@ def test_insert_block_insert_data_correctly(db_url):
     second_tx_id = second_tx["txid"]
 
     db.insert_block(block, engine)
+
     with Session(engine) as s:
         # block
         block_pk = s.get(db.Blocks, block_hash)
@@ -240,3 +215,61 @@ def test_insert_blocks_loops_correctly(db_url):
         # outputs
         count = s.scalar(select(func.count()).select_from(db.Outputs))
         assert count == 5
+
+
+# --------------------
+# add_foreign_keys
+# --------------------
+def test_foreign_keys_sanity_checks_fails_if_one_orphan_exist():
+    conn = MagicMock(spec=Connection)
+    conn.execute.return_value.scalar_one.return_value = 9
+    res = db.foreign_keys_sanity_checks(conn)
+    assert res is False
+
+
+def test_adding_foreign_keys_fails_if_sanity_check_fails():
+    engine = MagicMock(spec=Engine)
+    conn = engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.scalar_one.return_value = 9
+    db.add_foreign_keys(engine)
+    fk_checks = len(db.FK_ORPHAN_CHECKS)
+    assert conn.execute.call_count == fk_checks
+
+
+def test_adding_foreign_keys_calls_the_right_amount_of_execute():
+    engine = MagicMock(spec=Engine)
+    conn = engine.connect.return_value.__enter__.return_value
+    conn.execute.return_value.scalar_one.return_value = 0
+    db.add_foreign_keys(engine)
+    fk_count = len(db.FOREIGN_KEYS)
+    fk_checks = len(db.FK_ORPHAN_CHECKS)
+    assert conn.execute.call_count == (fk_count + fk_checks)
+
+
+def fk_exists(e: Engine, table: str, constraint_name: str) -> bool:
+    with e.connect() as conn:
+        return (
+            conn.execute(
+                text("""
+                SELECT 1 FROM pg_constraint
+                WHERE contype = 'f'
+                  AND conname = :name
+                  AND conrelid = CAST(:table as regclass)
+            """),
+                {"name": constraint_name, "table": table},
+            ).scalar()
+            is not None
+        )
+
+
+@pytest.mark.integration
+def test_adding_foreign_keys_works(db_url):
+    engine = db.set_up_db()
+    block = copy.deepcopy(var.block_a)
+    db.insert_block(block, engine)
+    db.add_foreign_keys(engine)
+    assert fk_exists(engine, "transactions", "fk_transactions_blockhash_blocks")
+    assert fk_exists(engine, "inputs", "fk_inputs_spending_txid_transactions")
+    assert fk_exists(engine, "outputs", "fk_outputs_spending_txid_transactions")
+    assert fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_blockhash_blocks")
+    assert fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_spending_txid_transactions")

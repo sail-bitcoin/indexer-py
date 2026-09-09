@@ -21,7 +21,7 @@ setup_logging(__name__)
 START_HEIGHT = 878031
 N_BLOCKS = 100
 
-SEMAPHORE_INITIAL = 7
+SEMAPHORE_INITIAL = 4
 SEMPAHORE_INCREASE = 30
 MAX_CONN = SEMAPHORE_INITIAL + SEMPAHORE_INCREASE
 MAX_CONN_KEEPALIVE = MAX_CONN
@@ -57,6 +57,7 @@ async def main():
                 for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)
             ]
         )
+    # db.add_foreign_keys(e)
 
     if rec is not None:
         path = rec.save()
