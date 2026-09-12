@@ -17,7 +17,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-import context_manager
+import context_manager as cm
 from logger import logger
 from utils import raise_outside_of_retry
 
@@ -173,27 +173,25 @@ def get_database_url() -> str:
 
 
 def create_db_engine(url: str | None = None):
-    with context_manager.fail_on_error():
-        logger.info("Creating Database Engine at %s", url)
-        url = url or get_database_url()
-        connect_args = {"options": "-c synchronous_commit=off"}
-        logger.info("Database Engine created.")
-        return create_engine(
-            url,
-            echo=False,
-            hide_parameters=True,
-            connect_args=connect_args,
-            json_serializer=lambda v: orjson.dumps(v).decode(),
-        )
+    logger.info("Creating Database Engine at %s", url)
+    url = url or get_database_url()
+    connect_args = {"options": "-c synchronous_commit=off"}
+    logger.info("Database Engine created.")
+    return create_engine(
+        url,
+        echo=False,
+        hide_parameters=True,
+        connect_args=connect_args,
+        json_serializer=lambda v: orjson.dumps(v).decode(),
+    )
 
 
 def create_tables(engine: Engine) -> None:
     # TODO: for later use Alembic instead
-    with context_manager.fail_on_error():
-        logger.info("Creating Tables...")
-        Base.metadata.create_all(engine)
-        table_names = inspect(engine).get_table_names()
-        logger.info("Tables created: %s", table_names)
+    logger.info("Creating Tables...")
+    Base.metadata.create_all(engine)
+    table_names = inspect(engine).get_table_names()
+    logger.info("Tables created: %s", table_names)
 
 
 def set_up_db() -> Engine:
@@ -217,73 +215,72 @@ def foreign_keys_sanity_checks(conn: Connection) -> bool:
 def add_foreign_keys(e: Engine):
     """Add foreign keys after adding the data optimize the loading time"""
     logger.info("Adding Foreign Keys to tables..")
-    with e.connect() as conn:
-        if foreign_keys_sanity_checks(conn):
-            for ddl in FOREIGN_KEYS:
-                conn.execute(text(ddl))
-            conn.commit()
-            logger.info("FKs added.")
+    with cm.catch_db_exceptions():
+        with e.connect() as conn:
+            if foreign_keys_sanity_checks(conn):
+                for ddl in FOREIGN_KEYS:
+                    conn.execute(text(ddl))
+                conn.commit()
+                logger.info("FKs added.")
 
 
 # --------------
 # Insertion
 # --------------
-def insert_from_dict(list_dict: list[dict], table_class: type[Base], conn: Connection):
+def _insert_from_dict(list_dict: list[dict], table_class: type[Base], conn: Connection):
     if not list_dict:
         logger.info("No rows to insert for %s, skipping.", table_class.__name__)
         return
-    with context_manager.rollback_on_error(conn):
-        if not issubclass(table_class, Base):
-            raise TypeError("table_class arg must be a subclass of Base.")
-        logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
-        conn.execute(insert(cast(Table, table_class.__table__)), list_dict)
+    if not issubclass(table_class, Base):
+        raise TypeError("table_class arg must be a subclass of Base.")
+    logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
+    conn.execute(insert(cast(Table, table_class.__table__)), list_dict)
 
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
-    with context_manager.fail_on_error():
-        block_hash = block["hash"]
-        txs = []
-        inputs = []
-        outputs = []
-        cb = block["coinbase_tx"]
-        for field in COINBASETX_FIELDS_TO_EXCLUDE:
-            cb.pop(field, None)
+    block_hash = block["hash"]
+    txs = []
+    inputs = []
+    outputs = []
+    cb = block["coinbase_tx"]
+    for field in COINBASETX_FIELDS_TO_EXCLUDE:
+        cb.pop(field, None)
 
-        for k, tx in enumerate(block["tx"]):
-            # 1. Transactions
-            txid = tx["txid"]
-            vin = tx.pop("vin")
-            vout = tx.pop("vout")
-            tx["blockhash"] = block_hash
-            tx["n"] = k
+    for k, tx in enumerate(block["tx"]):
+        # 1. Transactions
+        txid = tx["txid"]
+        vin = tx.pop("vin")
+        vout = tx.pop("vout")
+        tx["blockhash"] = block_hash
+        tx["n"] = k
 
-            # 1. Inputs
-            for n, i in enumerate(vin):
-                # 2. Coinbase
-                if k == 0 and n == 0 and "coinbase" in i:
-                    cb["blockhash"] = block_hash
-                    cb["spending_txid"] = txid
-                    break  # first input of first block's tx is COINBASE not INPUTS
+        # 1. Inputs
+        for n, i in enumerate(vin):
+            # 2. Coinbase
+            if k == 0 and n == 0 and "coinbase" in i:
+                cb["blockhash"] = block_hash
+                cb["spending_txid"] = txid
+                break  # first input of first block's tx is COINBASE not INPUTS
 
-                i["spending_txid"] = txid
-                i["n"] = n
-                # txinwitness only present in Segwit inputs
-                if "txinwitness" not in i:
-                    i["txinwitness"] = None
-                inputs.append(i)
+            i["spending_txid"] = txid
+            i["n"] = n
+            # txinwitness only present in Segwit inputs
+            if "txinwitness" not in i:
+                i["txinwitness"] = None
+            inputs.append(i)
 
-            # 3. Outputs
-            for o in vout:
-                o["spending_txid"] = txid
-                sats = int(Decimal(o["value"] * 10**8))
-                o["value"] = sats
-                outputs.append(o)
+        # 3. Outputs
+        for o in vout:
+            o["spending_txid"] = txid
+            sats = int(Decimal(o["value"] * 10**8))
+            o["value"] = sats
+            outputs.append(o)
 
-            txs.append(tx)
+        txs.append(tx)
 
-        for field in BLOCK_FIELDS_TO_EXCLUDE:
-            block.pop(field, None)
-        return block, cb, txs, inputs, outputs
+    for field in BLOCK_FIELDS_TO_EXCLUDE:
+        block.pop(field, None)
+    return block, cb, txs, inputs, outputs
 
 
 @retry(
@@ -293,20 +290,24 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
     retry=retry_if_exception(should_retry),
     before_sleep=before_sleep_log(logger, WARNING),
 )
+def _insert_prepared(block_info: dict, coinbase: dict, txs: list, inputs: list, outputs, e: Engine):
+    logger.info("Adding Blocks height: %s and all it's transactions...", block_info["height"])
+    with e.connect() as conn:
+        _insert_from_dict([block_info], Blocks, conn)
+        _insert_from_dict(txs, Transactions, conn)
+        _insert_from_dict([coinbase], CoinbaseInputs, conn)
+        _insert_from_dict(inputs, Inputs, conn)
+        _insert_from_dict(outputs, Outputs, conn)
+        conn.commit()
+    logger.info("Finished processing block %s.", block_info["height"])
+
+
 def insert_block(block: dict, e: Engine):
     if not block:
         logger.error("Block dict empty, nothing to insert.")
         return
-    block_info, coinbase, txs, inputs, outputs = _prepare_block_data(block)
-    logger.info("Adding Blocks height: %s and all it's transactions...", block["height"])
-    with e.connect() as conn:
-        insert_from_dict([block_info], Blocks, conn)
-        insert_from_dict(txs, Transactions, conn)
-        insert_from_dict([coinbase], CoinbaseInputs, conn)
-        insert_from_dict(inputs, Inputs, conn)
-        insert_from_dict(outputs, Outputs, conn)
-        conn.commit()
-    logger.info("Finished processing block %s.", block["height"])
+    prepared = _prepare_block_data(block)
+    _insert_prepared(*prepared, e)
 
 
 def insert_blocks(blocks: list[dict], e: Engine):
