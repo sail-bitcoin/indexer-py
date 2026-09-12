@@ -9,7 +9,7 @@ from sqlalchemy import Engine
 
 import db
 from logger import setup_logging
-from context_manager import fail_on_error, log_on_db_insert_error
+from dlq import add_to_deadletterqueue
 from semaphore_controller import SemaphoreController
 
 # Recording wall clock and cpu time for the execution
@@ -30,14 +30,13 @@ MAX_CONN_KEEPALIVE = MAX_CONN
 async def process_block(sc: SemaphoreController, height: int, engine: Engine):
     block_hash = None
     block = None
-    with fail_on_error():
+    with add_to_deadletterqueue(height):
         block_hash = await sc.get_block_hash(height)
 
         async with sc.getblock_semaphore:
             if block_hash is not None:
                 block = await sc.get_block(block_hash)
 
-    with log_on_db_insert_error():
         if block is not None:
             await asyncio.to_thread(db.insert_block, block, engine)
 

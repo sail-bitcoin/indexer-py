@@ -5,6 +5,7 @@ from sqlalchemy import text
 from testcontainers.community.postgres import PostgresContainer
 
 import db
+import dlq
 
 # support Podman's socket
 if "DOCKER_HOST" not in os.environ:
@@ -39,3 +40,10 @@ def clean_tables(request):
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS blocks, transactions, inputs, outputs, coinbaseinputs CASCADE"))
     engine.dispose()
+
+
+@pytest.fixture
+def clear_dlq():
+    dlq.queue.clear()
+    yield
+    dlq.queue.clear()

@@ -148,78 +148,78 @@ async def test_call_rpc_200():
 async def test_call_rpc_retries_on_429_RpcHTTPStatusError():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(429,json={})
                 )
                 with pytest.raises(RpcHTTPStatusError):
                     await r.call_rpc(VERB, METHOD, PARAMS)
-                assert route.call_count == retries
+                assert route.call_count == attempts
 
 
 async def test_call_rpc_retries_on_500_RpcHTTPStatusError():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(500,json={"result": "fake"})
                 )
                 with pytest.raises(RpcHTTPStatusError):
                     await r.call_rpc(VERB, METHOD, PARAMS)
-                assert route.call_count == retries
+                assert route.call_count == attempts
 
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_with_code_message():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(200,json={"result": "nothing", "error": {"code": "-8", "message": "Invalid parameter"}})
                 )
                 with pytest.raises(BitcoinRpcError):
                     await r.call_rpc(VERB, METHOD, PARAMS)
-                assert route.call_count == retries
+                assert route.call_count == attempts
 
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_not_none_without_code_message():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(200,json={"result": "nothing", "error": {}})
                 )
                 with pytest.raises(BitcoinRpcError):
                     await r.call_rpc(VERB, METHOD, PARAMS)
-                assert route.call_count == retries
+                assert route.call_count == attempts
 
 
 async def test_call_rpc_retries_on_200_BitcoinRpcError_error_result_both_none():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(200,json={})
                 )
                 with pytest.raises(BitcoinRpcError):
                     await r.call_rpc(VERB, METHOD, PARAMS)
-                assert route.call_count == retries
+                assert route.call_count == attempts
 
 
 async def test_call_rpc_should_not_retry_on_403():
     async with rpc.RpcClient(MAX_CONN, MAX_CONN_KEEPALIVE) as r:
         with prepare_call_rpc():
-            retries = 3
-            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, retries):
+            attempts = 3
+            with respx.mock, fast_retries(rpc.RpcClient.call_rpc, attempts):
                 # fmt: off
                 route = respx.post(r.rpc_url).mock(
                     return_value = httpx.Response(403,json={"result": "good"})

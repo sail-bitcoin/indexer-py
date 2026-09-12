@@ -13,6 +13,8 @@ disable=
     fixme,
     too-few-public-methods,
     too-many-locals,
+    too-many-arguments,
+    too-many-positional-arguments,
     missing-class-docstring,
     missing-module-docstring,
     missing-function-docstring,
