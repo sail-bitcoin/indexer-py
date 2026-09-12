@@ -27,7 +27,7 @@ block_a = {
             # [output]
             "vout": [
                 {
-                    "value": 0.00000546,
+                    "value": 0.7,
                     "n": 0,
                     "scriptPubKey": {
                         "hex": "76a914c6740a12d0a7d556f89782bf5faf0e12cf25a63988ac",
@@ -133,7 +133,7 @@ block_b = {
                     },
                 },
             ],
-            "fee": 0.000282,
+            "fee": 0.3,
             "hex": "01000000000101900a04350acfe8803603510ae22dd5a3a25dcc6434c20bd61a09247a664176890000000000ffffffff0230570500000000001600148548de2901afd06de6a6227b43cb2353994a0116211d060000000000160014b6c984605d175e1b5da6b4a1f57e68c01f89144002483045022100b069e6616dea0e0eac2cd0c9cb11e70ea0248903d07e786a2ee7b1fdfca1569d02205db21fcd1cf2357ca08f37ffed7a104f76aee89526510e1f567d713c3bcb732e012102b4ea32721b8f3b3a84816c246802508c02460189aaa28536b5e82cb120cf2beb00000000",
         },
     ],

@@ -1,3 +1,4 @@
+from string.templatelib import convert
 from unittest.mock import patch, MagicMock
 from decimal import Decimal
 
@@ -52,12 +53,37 @@ def test__prepare_block_data_is_cleaned_up_correctly():
     assert len(outputs) == 4
 
 
+def convert_to_satoshis(s):
+    return int(Decimal(str(s)) * 10**8)
+
+
+def test_that_convert_to_satoshis_method_works_correctly():
+    float = 0.3
+    decimal = Decimal(0.3)
+    assert float is not decimal
+
+    a = 0.3
+    b = {"fee": a}
+    res = convert_to_satoshis(b["fee"])
+    float_to_sats = int(Decimal(a) * 10**8)
+    assert res != float_to_sats
+
+    decimal_to_sats = int(Decimal(str(a)) * 10**8)
+    assert res == decimal_to_sats
+
+
 def test__prepare_block_data_convert_output_value_to_satoshis():
     b = copy.deepcopy(var.block_a)
-    value_btc = Decimal(b["tx"][0]["vout"][0]["value"])
-    value_stats = int(Decimal(value_btc * 10**8))
+    value_sats = convert_to_satoshis(b["tx"][0]["vout"][0]["value"])
     block, cb, txs, inputs, outputs = db._prepare_block_data(b)
-    assert outputs[0]["value"] == value_stats
+    assert outputs[0]["value"] == value_sats
+
+
+def test__prepare_block_data_convert_fee_to_satoshis():
+    b = copy.deepcopy(var.block_b)
+    fee_sats = convert_to_satoshis(b["tx"][1].get("fee", 0))
+    block, cb, txs, inputs, outputs = db._prepare_block_data(b)
+    assert txs[1]["fee"] == fee_sats
 
 
 def test__prepare_block_data_raise_on_errors():

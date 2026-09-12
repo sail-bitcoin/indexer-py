@@ -5,7 +5,7 @@ from typing import cast
 
 import orjson
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Boolean, Column, Float, BigInteger, Integer, String, Table, create_engine, inspect, insert, text
+from sqlalchemy import JSON, Column, Float, BigInteger, Integer, String, Table, create_engine, inspect, insert, text
 from sqlalchemy.engine import Engine, Connection
 from sqlalchemy.exc import DisconnectionError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase
@@ -121,14 +121,13 @@ class Transactions(Base):
     txid = Column(String, primary_key=True)
     n = Column(Integer)
     hash = Column(String)
-    in_active_chain = Column(Boolean)
     hex = Column(String)
     size = Column(Integer)
     vsize = Column(Integer)
     weight = Column(Integer)
     version = Column(Integer)
     locktime = Column(BigInteger)
-    fee = Column(Integer)
+    fee = Column(BigInteger)
     blockhash = Column(String)
 
 
@@ -253,6 +252,8 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
         vout = tx.pop("vout")
         tx["blockhash"] = block_hash
         tx["n"] = k
+        fee = int(Decimal(str(tx.get("fee", 0))) * 10**8)
+        tx["fee"] = fee
 
         # 1. Inputs
         for n, i in enumerate(vin):
@@ -272,7 +273,7 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
         # 3. Outputs
         for o in vout:
             o["spending_txid"] = txid
-            sats = int(Decimal(o["value"] * 10**8))
+            sats = int(Decimal(str(o["value"])) * 10**8)
             o["value"] = sats
             outputs.append(o)
 
