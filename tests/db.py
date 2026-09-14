@@ -1,17 +1,30 @@
 from string.templatelib import convert
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from decimal import Decimal
 
 import copy
+
+from sqlalchemy import exc
+
+from asyncpg import InvalidPasswordError as PGInvalidPasswordError
 import exceptions
 import pytest
 from sqlalchemy import Connection, Engine, select, func, text
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import OperationalError, DisconnectionError, TimeoutError as SATimeoutError
+from sqlalchemy.exc import DBAPIError, OperationalError, DisconnectionError, TimeoutError as SATimeoutError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 import db
 from tests.utils import fast_retries
 import tests.variables as var
+
+
+def mock_engine():
+    engine = MagicMock(spec=AsyncEngine)
+    conn = AsyncMock(spec=AsyncConnection)
+    # with e.connect() as conn --> conn is the returned value of e.connect.__enter__()
+    engine.connect.return_value.__aenter__.return_value = conn
+    return engine, conn
 
 
 def returned_mock__prepare_block_data():
@@ -96,161 +109,196 @@ def test__prepare_block_data_raise_on_errors():
 # --------------------
 # _insert_from_dict
 # --------------------
-def test__insert_from_dict_executes_with_correct_table_and_params():
-    mock_session = MagicMock(spec=Session)
+async def test__insert_from_dict_executes_with_correct_table_and_params():
+    conn = AsyncMock(spec=AsyncConnection)
     list_dict = [{"hash": "000abc", "height": 1}]
-    db._insert_from_dict(list_dict, db.Blocks, mock_session)
+    await db._insert_from_dict(list_dict, db.Blocks, conn)
 
-    mock_session.execute.assert_called_once()
-    stmt, params = mock_session.execute.call_args.args
+    conn.execute.assert_called_once()
+    stmt, params = conn.execute.call_args.args
     assert stmt.table.name == db.Blocks.__tablename__
     assert params == list_dict
+    conn.execute.assert_awaited_once()
 
 
-def test__insert_from_dict_rejects_non_base_subclass():
-    mock_session = MagicMock(spec=Session)
+async def test__insert_from_dict_rejects_non_base_subclass():
+    mock_session = AsyncMock(spec=AsyncConnection)
     with pytest.raises(TypeError):
-        db._insert_from_dict([{"a": 1}], dict, mock_session)  # pyright: ignore
+        await db._insert_from_dict([{"a": 1}], dict, mock_session)  # pyright: ignore
 
 
-def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
-    mock_session = MagicMock(spec=Session)
-    db._insert_from_dict(None, db.Blocks, mock_session)  # pyright: ignore
-    db._insert_from_dict([], db.Blocks, mock_session)
-    mock_session.execute.assert_not_called()
+async def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
+    conn = AsyncMock(spec=AsyncConnection)
+    await db._insert_from_dict(None, db.Blocks, conn)  # pyright: ignore
+    await db._insert_from_dict([], db.Blocks, conn)
+    conn.execute.assert_not_called()
 
 
 @pytest.mark.integration
-def test__insert_from_dict_db_insertion(db_url):
-    engine = db.set_up_db()
+async def test__insert_from_dict_db_insertion(engine):
     block = copy.deepcopy(var.block_a)
     block_hash = block["hash"]
     block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
 
-    with Session(engine) as s:
-        conn = s.connection()
-        db._insert_from_dict([block_info], db.Blocks, conn)
-        pk = s.get(db.Blocks, block_hash)
-        s.commit()
+    async with AsyncSession(engine) as s:
+        conn = await s.connection()
+        await db._insert_from_dict([block_info], db.Blocks, conn)
+        pk = await s.get(db.Blocks, block_hash)
+        await s.commit()
 
-    with Session(engine) as s2:
-        pk = s2.get(db.Blocks, block_hash)
+    async with AsyncSession(engine) as s2:
+        pk = await s2.get(db.Blocks, block_hash)
         # commit changes are visible to another session
         assert pk is not None
 
 
 @pytest.mark.integration
-def test__insert_from_dict_is_not_committing_changes_to_db(db_url):
-    engine = db.set_up_db()
+async def test__insert_from_dict_is_not_committing_changes_to_db(engine):
     block = copy.deepcopy(var.block_a)
     block_hash = block["hash"]
     block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
 
-    with Session(engine) as s:
-        conn = s.connection()
-        db._insert_from_dict([block_info], db.Blocks, conn)
-        pk = s.get(db.Blocks, block_hash)
+    async with AsyncSession(engine) as s:
+        conn = await s.connection()
+        await db._insert_from_dict([block_info], db.Blocks, conn)
+        pk = await s.get(db.Blocks, block_hash)
         # same session so uncommitted is visible
         assert pk is not None
 
-    with Session(engine) as s2:
-        pk2 = s2.get(db.Blocks, block_hash)
+    async with AsyncSession(engine) as s2:
+        pk2 = await s2.get(db.Blocks, block_hash)
         # uncommitted, not visible
         assert pk2 is None
 
 
 # --------------------
+# _insert_prepared
+# --------------------
+
+
+@pytest.mark.parametrize("exc_class", db.ASYNCPG_TRANSIENT_CONN_ERR)
+@patch("db._insert_from_dict")
+async def test__insert_prepared_retries_on_asyncpg_transient_errors(mock__insert_from_dict, exc_class):
+    e = AsyncMock(spec=AsyncEngine)
+    attempts = 3
+    prepared = returned_mock__prepare_block_data()
+    mock__insert_from_dict.side_effect = exc_class("error")
+
+    with fast_retries(db._insert_prepared, attempts):
+        with pytest.raises(exc_class):
+            await db._insert_prepared(*prepared, e)
+
+    assert mock__insert_from_dict.await_count == attempts
+    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+
+
+@patch("db._insert_from_dict")
+async def test__insert_prepared_do_not_retry_on_asyncpg_non_transient_errors(mock__insert_from_dict):
+    e = AsyncMock(spec=AsyncEngine)
+    attempts = 3
+    prepared = returned_mock__prepare_block_data()
+    mock__insert_from_dict.side_effect = PGInvalidPasswordError("error")
+
+    with fast_retries(db._insert_prepared, attempts):
+        with pytest.raises(PGInvalidPasswordError):
+            await db._insert_prepared(*prepared, e)
+
+    assert mock__insert_from_dict.await_count == 1
+    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+
+
+@pytest.mark.parametrize("exc_class", [SATimeoutError, OSError, DBAPIError])
+@patch("db._insert_from_dict")
+async def test__insert_prepared_retries_on_some_exceptions(mock__insert_from_dict, exc_class):
+    e = AsyncMock(spec=AsyncEngine)
+    attempts = 3
+    prepared = returned_mock__prepare_block_data()
+    if issubclass(exc_class, DBAPIError):
+        mock__insert_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"), connection_invalidated=True)
+    else:
+        mock__insert_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"))
+
+    with fast_retries(db._insert_prepared, attempts):
+        with pytest.raises(exc_class):
+            await db._insert_prepared(*prepared, e)
+
+    assert mock__insert_from_dict.await_count == attempts
+    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+
+
+# --------------------
 # insert_block
 # --------------------
+
+
 @patch("db._prepare_block_data")
-def test_insert_block_handles_execute_5_times_and_commit_once(mock_prepare):
+async def test_insert_block_handles_execute_5_times_and_commit_once(mock_prepare):
     mock_prepare.return_value = returned_mock__prepare_block_data()
 
-    engine = MagicMock(spec=Engine)
-    # with e.connect() as conn --> conn is the returned value of e.connect.__enter__()
-    conn = engine.connect.return_value.__enter__.return_value
+    engine, conn = mock_engine()
 
     fake_block = {"height": 1}
-    db.insert_block(fake_block, e=engine)
+    await db.insert_block(fake_block, e=engine)
 
     mock_prepare.assert_called_once_with(fake_block)
-    assert conn.execute.call_count == 5
+    assert conn.execute.await_count == 5
     conn.commit.assert_called_once()
 
 
 @patch("db._prepare_block_data")
-def test_insert_block_handles__prepare_block_data_failures(mock_prepare):
+async def test_insert_block_handles__prepare_block_data_failures(mock_prepare):
     mock_prepare.return_value = None
-    engine = MagicMock(spec=Engine)
+    engine = AsyncMock(spec=AsyncEngine)
 
     with pytest.raises(TypeError):
-        db.insert_block({"height": 1}, e=engine)
+        await db.insert_block({"height": 1}, e=engine)
 
 
 @patch("db._insert_from_dict")
 @patch("db._prepare_block_data")
-def test_insert_block_do_not_retry_on__prepare_block_errors(mock__prepare_block_data, mock__insert_from_dict):
-    e = MagicMock(spec=Engine)
+async def test_insert_block_do_not_retry_on__prepare_block_errors(mock__prepare_block_data, mock__insert_from_dict):
+    e = AsyncMock(spec=AsyncEngine)
     block = copy.deepcopy(var.block_a)
     # use a different exc than KeyError: if prepare is retried, as it mutates block dict, it will throw a KeyError
     mock__prepare_block_data.side_effect = RuntimeError("error")
 
     with pytest.raises(RuntimeError):
-        db.insert_block(block, e)
+        await db.insert_block(block, e)
     assert mock__prepare_block_data.call_count == 1
     assert mock__insert_from_dict.call_count == 0
 
 
-@pytest.mark.parametrize("exc_class", [OperationalError, SATimeoutError, DisconnectionError])
-@patch("db._insert_from_dict")
-@patch("db._prepare_block_data")
-def test_insert_block_retries_on_sqlalchemy_network_errors(mock__prepare_block_data, mock__insert_from_dict, exc_class):
-    e = MagicMock(spec=Engine)
-    block = copy.deepcopy(var.block_a)
-    attempts = 3
-    mock__prepare_block_data.return_value = returned_mock__prepare_block_data()
-    mock__insert_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"))
-
-    with fast_retries(db._insert_prepared, attempts):
-        with pytest.raises(exc_class):
-            db.insert_block(block, e)
-
-    assert mock__prepare_block_data.call_count == 1
-    assert mock__insert_from_dict.call_count == attempts
-
-
 @patch("db._insert_prepared")
 @patch("db._prepare_block_data")
-def test_insert_block_passes_prepared_data_to__insert_prepared(mock__prepare_block_data, mock__insert_prepared):
-    e = MagicMock(spec=Engine)
+async def test_insert_block_passes_prepared_data_to__insert_prepared(mock__prepare_block_data, mock__insert_prepared):
+    e = AsyncMock(spec=AsyncEngine)
     block = copy.deepcopy(var.block_a)
     prepared = returned_mock__prepare_block_data()
     mock__prepare_block_data.return_value = prepared
 
-    db.insert_block(block, e)
+    await db.insert_block(block, e)
 
     mock__prepare_block_data.assert_called_once_with(block)
     mock__insert_prepared.assert_called_once_with(*prepared, e)
 
 
 @patch("db._insert_from_dict")
-def test_insert_block_network_error_handling_with_real__insert_prepared(mock__insert_from_dict):
+async def test_insert_block_network_error_handling_with_real__insert_prepared(mock__insert_from_dict):
     b = copy.deepcopy(var.block_b)
     b_copy2 = copy.deepcopy(var.block_b)
-    e = MagicMock(spec=Engine)
+    e = AsyncMock(spec=AsyncEngine)
     attempts = 3
-    mock__insert_from_dict.side_effect = OperationalError("INSERT ...", {}, Exception("connectin lost"))
+    mock__insert_from_dict.side_effect = OSError
     with fast_retries(db._insert_prepared, attempts):
-        with pytest.raises(OperationalError):
-            db.insert_block(b, e)
+        with pytest.raises(OSError):
+            await db.insert_block(b, e)
     assert mock__insert_from_dict.call_count == attempts
     prepared = db._prepare_block_data(b_copy2)
-    assert mock__insert_from_dict.call_args(*prepared)
+    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
 
 
 @pytest.mark.integration
-def test_insert_block_insert_data_correctly(db_url):
-    engine = db.set_up_db()
+async def test_insert_block_insert_data_correctly(engine):
     block = copy.deepcopy(var.block_b)
 
     block_hash = block["hash"]
@@ -260,34 +308,34 @@ def test_insert_block_insert_data_correctly(db_url):
     second_tx = txs[1]
     second_tx_id = second_tx["txid"]
 
-    db.insert_block(block, engine)
+    await db.insert_block(block, engine)
 
-    with Session(engine) as s:
+    async with AsyncSession(engine) as s:
         # block
-        block_pk = s.get(db.Blocks, block_hash)
+        block_pk = await s.get(db.Blocks, block_hash)
         assert block_pk is not None
         # transactions
-        tx_pk = s.get(db.Transactions, first_tx_id)
+        tx_pk = await s.get(db.Transactions, first_tx_id)
         assert tx_pk is not None
         stmt = select(db.Transactions.txid).where(db.Transactions.blockhash == block_hash)
-        tx_fk = s.scalar(stmt)
+        tx_fk = await s.scalar(stmt)
         assert tx_fk == first_tx_id
         # coinbase
-        cb_pk = s.get(db.CoinbaseInputs, block_hash)
+        cb_pk = await s.get(db.CoinbaseInputs, block_hash)
         assert cb_pk is not None
         stmt = select(db.CoinbaseInputs.spending_txid).where(db.CoinbaseInputs.blockhash == block_hash)
-        cb_spending_txid = s.scalar(stmt)
+        cb_spending_txid = await s.scalar(stmt)
         assert cb_spending_txid == first_tx_id
         # inputs
-        first_tx_inputs = s.get(db.Inputs, (first_tx_id, 0))
+        first_tx_inputs = await s.get(db.Inputs, (first_tx_id, 0))
         assert first_tx_inputs is None
-        second_tx_inputs = s.get(db.Inputs, (second_tx_id, 0))
+        second_tx_inputs = await s.get(db.Inputs, (second_tx_id, 0))
         assert second_tx_inputs is not None
         # outputs
-        first_tx_outputs = s.get(db.Outputs, (first_tx_id, 0))
+        first_tx_outputs = await s.get(db.Outputs, (first_tx_id, 0))
         assert first_tx_outputs is not None
         stmt = select(func.count()).select_from(db.Outputs).where(db.Outputs.spending_txid == second_tx_id)
-        count = s.scalar(stmt)
+        count = await s.scalar(stmt)
         assert count == 2
 
 
@@ -295,62 +343,68 @@ def test_insert_block_insert_data_correctly(db_url):
 # insert_blocks
 # --------------------
 @pytest.mark.integration
-def test_insert_blocks_loops_correctly(db_url):
-    engine = db.set_up_db()
+async def test_insert_blocks_loops_correctly(engine):
     blocks = copy.deepcopy([var.block_a, var.block_b])
-    db.insert_blocks(blocks, engine)
+    await db.insert_blocks(blocks, engine)
 
-    with Session(engine) as s:
+    async with engine.connect() as conn:
         # blocks
-        count = s.scalar(select(func.count(db.Blocks.hash)))
+        count = await conn.scalar(select(func.count(db.Blocks.hash)))
         assert count == 2
         # transactions
-        count = s.scalar(select(func.count(db.Transactions.txid)))
+        count = await conn.scalar(select(func.count(db.Transactions.txid)))
         assert count == 3
         # inputs
-        count = s.scalar(select(func.count()).select_from(db.Inputs))
+        count = await conn.scalar(select(func.count()).select_from(db.Inputs))
         assert count == 1
         # coinbase inputs
-        count = s.scalar(select(func.count(db.CoinbaseInputs.blockhash)))
+        count = await conn.scalar(select(func.count(db.CoinbaseInputs.blockhash)))
         assert count == 2
         # outputs
-        count = s.scalar(select(func.count()).select_from(db.Outputs))
+        count = await conn.scalar(select(func.count()).select_from(db.Outputs))
         assert count == 5
 
 
 # --------------------
 # add_foreign_keys
 # --------------------
-def test_foreign_keys_sanity_checks_fails_if_one_orphan_exist():
-    conn = MagicMock(spec=Connection)
-    conn.execute.return_value.scalar_one.return_value = 9
-    res = db.foreign_keys_sanity_checks(conn)
+async def test_foreign_keys_sanity_checks_fails_if_one_orphan_exist():
+    conn = AsyncMock(spec=AsyncConnection)
+    conn.scalar.return_value = 9
+    res = await db.foreign_keys_sanity_checks(conn)
     assert res is False
 
 
-def test_adding_foreign_keys_fails_if_sanity_check_fails():
-    engine = MagicMock(spec=Engine)
-    conn = engine.connect.return_value.__enter__.return_value
-    conn.execute.return_value.scalar_one.return_value = 9
-    db.add_foreign_keys(engine)
+async def test_foreign_keys_sanity_checks_success_if_no_orphan():
+    conn = AsyncMock(spec=AsyncConnection)
+    conn.scalar.return_value = 0
+    res = await db.foreign_keys_sanity_checks(conn)
+    assert res is True
+
+
+async def test_adding_foreign_keys_fails_if_sanity_check_fails():
+    engine, conn = mock_engine()
+    conn.scalar.return_value = 9
+    await db.add_foreign_keys(engine)
     fk_checks = len(db.FK_ORPHAN_CHECKS)
-    assert conn.execute.call_count == fk_checks
+    assert conn.scalar.await_count == fk_checks
 
 
-def test_adding_foreign_keys_calls_the_right_amount_of_execute():
-    engine = MagicMock(spec=Engine)
-    conn = engine.connect.return_value.__enter__.return_value
-    conn.execute.return_value.scalar_one.return_value = 0
-    db.add_foreign_keys(engine)
+async def test_adding_foreign_keys_calls_the_right_amount_of_connect_methods():
+    engine, conn = mock_engine()
+    conn.scalar.return_value = 0
+    await db.add_foreign_keys(engine)
     fk_count = len(db.FOREIGN_KEYS)
     fk_checks = len(db.FK_ORPHAN_CHECKS)
-    assert conn.execute.call_count == (fk_count + fk_checks)
+    assert conn.scalar.await_count == fk_checks
+    assert conn.execute.await_count == fk_count
+    conn.commit.assert_awaited_once()
 
 
-def fk_exists(e: Engine, table: str, constraint_name: str) -> bool:
-    with e.connect() as conn:
+async def fk_exists(e: AsyncEngine, table: str, constraint_name: str) -> bool:
+    async with e.connect() as conn:
         return (
-            conn.execute(
+            await conn.scalar(
                 text("""
                 SELECT 1 FROM pg_constraint
                 WHERE contype = 'f'
@@ -358,19 +412,18 @@ def fk_exists(e: Engine, table: str, constraint_name: str) -> bool:
                   AND conrelid = CAST(:table as regclass)
             """),
                 {"name": constraint_name, "table": table},
-            ).scalar()
+            )
             is not None
         )
 
 
 @pytest.mark.integration
-def test_adding_foreign_keys_works(db_url):
-    engine = db.set_up_db()
+async def test_adding_foreign_keys_works(engine):
     block = copy.deepcopy(var.block_a)
-    db.insert_block(block, engine)
-    db.add_foreign_keys(engine)
-    assert fk_exists(engine, "transactions", "fk_transactions_blockhash_blocks")
-    assert fk_exists(engine, "inputs", "fk_inputs_spending_txid_transactions")
-    assert fk_exists(engine, "outputs", "fk_outputs_spending_txid_transactions")
-    assert fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_blockhash_blocks")
-    assert fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_spending_txid_transactions")
+    await db.insert_block(block, engine)
+    await db.add_foreign_keys(engine)
+    assert await fk_exists(engine, "transactions", "fk_transactions_blockhash_blocks")
+    assert await fk_exists(engine, "inputs", "fk_inputs_spending_txid_transactions")
+    assert await fk_exists(engine, "outputs", "fk_outputs_spending_txid_transactions")
+    assert await fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_blockhash_blocks")
+    assert await fk_exists(engine, "coinbaseinputs", "fk_coinbaseinputs_spending_txid_transactions")

@@ -7,6 +7,9 @@ from testcontainers.community.postgres import PostgresContainer
 import db
 import dlq
 
+# ------------
+# DB
+# ------------
 # support Podman's socket
 if "DOCKER_HOST" not in os.environ:
     for _candidate in (f"/run/user/{os.getuid()}/podman/podman.sock", "/run/podman/podman.sock"):
@@ -18,7 +21,7 @@ if "DOCKER_HOST" not in os.environ:
 
 @pytest.fixture(scope="session")
 def postgres_container():
-    with PostgresContainer("postgres:15") as pg:
+    with PostgresContainer("postgres:15", driver="asyncpg") as pg:
         yield pg
 
 
@@ -29,19 +32,18 @@ def db_url(postgres_container, monkeypatch):
     return url
 
 
-@pytest.fixture(autouse=True)
-def clean_tables(request):
-    needs_db = "db_url" in request.fixturenames
-    url = request.getfixturevalue("db_url") if needs_db else None
-    yield
-    if url is None:
-        return
-    engine = db.create_db_engine(url)
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS blocks, transactions, inputs, outputs, coinbaseinputs CASCADE"))
-    engine.dispose()
+@pytest.fixture
+async def engine(db_url):
+    e = await db.set_up_db()
+    yield e
+    async with e.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS blocks, transactions, inputs, outputs, coinbaseinputs CASCADE"))
+    await e.dispose()
 
 
+# ------------
+# DLQ
+# ------------
 @pytest.fixture
 def clear_dlq():
     dlq.queue.clear()

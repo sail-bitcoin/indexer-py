@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 import uvloop
-from sqlalchemy import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 import db
 from logger import setup_logging
@@ -27,7 +27,7 @@ MAX_CONN = SEMAPHORE_INITIAL + SEMPAHORE_INCREASE
 MAX_CONN_KEEPALIVE = MAX_CONN
 
 
-async def process_block(sc: SemaphoreController, height: int, engine: Engine):
+async def process_block(sc: SemaphoreController, height: int, engine: AsyncEngine, db_semaphore: asyncio.Semaphore):
     block_hash = None
     block = None
     with add_to_deadletterqueue(height):
@@ -38,7 +38,8 @@ async def process_block(sc: SemaphoreController, height: int, engine: Engine):
                 block = await sc.get_block(block_hash)
 
         if block is not None:
-            await asyncio.to_thread(db.insert_block, block, engine)
+            async with db_semaphore:
+                await db.insert_block(block, engine)
 
 
 async def main():
@@ -47,16 +48,20 @@ async def main():
     rec = None
     if rec_prefix is not None:
         rec = Recorder(strategy=rec_prefix, n_blocks=N_BLOCKS)
-    e = db.set_up_db()
+    e = await db.set_up_db()
     sc = SemaphoreController(N_BLOCKS, SEMAPHORE_INITIAL, SEMPAHORE_INCREASE, MAX_CONN, MAX_CONN_KEEPALIVE)
-    async with sc:
-        # fmt: off
-        await asyncio.gather(*[
-                process_block(sc, h, e)
-                for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)
-            ]
-        )
-    # db.add_foreign_keys(e)
+    db_semaphore = asyncio.Semaphore(db.SA_POOL_SIZE)
+    try:
+        async with sc:
+            # fmt: off
+            await asyncio.gather(*[
+                    process_block(sc, h, e, db_semaphore)
+                    for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)
+                ]
+            )
+        await db.add_foreign_keys(e)
+    finally:
+        await e.dispose()
 
     if rec is not None:
         path = rec.save()

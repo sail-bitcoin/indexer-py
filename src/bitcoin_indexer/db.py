@@ -3,12 +3,14 @@ from decimal import Decimal
 from logging import WARNING
 from typing import cast
 
+import asyncpg
 import orjson
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Column, Float, BigInteger, Integer, String, Table, create_engine, inspect, insert, text
-from sqlalchemy.engine import Engine, Connection
-from sqlalchemy.exc import DisconnectionError, OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy import JSON, Column, Float, BigInteger, Integer, String, Table, insert, text
+from sqlalchemy.exc import DBAPIError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection, create_async_engine
+from sqlalchemy.engine import make_url
 from tenacity import (
     before_sleep_log,
     retry,
@@ -28,9 +30,15 @@ class Base(DeclarativeBase):
 
 load_dotenv()
 
+ASYNCPG_TRANSIENT_CONN_ERR = (asyncpg.InsufficientResourcesError, asyncpg.OperatorInterventionError)
+
 
 def should_retry(exc: BaseException) -> bool:
-    return isinstance(exc, (OperationalError, SATimeoutError, DisconnectionError))
+    # pool exhausted, or Postgres unreachable (asyncpg raises OSError)
+    if isinstance(exc, (SATimeoutError, OSError, *ASYNCPG_TRANSIENT_CONN_ERR)):
+        return True
+    # connection dropped mid-query
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
 
 
 # ------------------------------------------------------------
@@ -42,6 +50,8 @@ COINBASETX_FIELDS_TO_EXCLUDE = ["witness"]
 STALE_BLOCK_FIELDS = {"confirmations"}
 STALE_TRANSACTION_FIELDS = {"confirmations"}
 INSERTION_RETRIES = 4
+SA_POOL_SIZE = 16
+SA_POOL_MAX_OVERFLOW = 0
 
 FOREIGN_KEYS = [
     "ALTER TABLE transactions ADD CONSTRAINT fk_transactions_blockhash_blocks FOREIGN KEY (blockhash) REFERENCES blocks (hash)",
@@ -172,68 +182,67 @@ def get_database_url() -> str:
 
 
 def create_db_engine(url: str | None = None):
-    logger.info("Creating Database Engine at %s", url)
     url = url or get_database_url()
-    connect_args = {"options": "-c synchronous_commit=off"}
-    logger.info("Database Engine created.")
-    return create_engine(
+    logger.info("Creating Database AsyncEngine at %s", make_url(url).render_as_string(hide_password=True))
+    return create_async_engine(
         url,
         echo=False,
         hide_parameters=True,
-        connect_args=connect_args,
+        connect_args={"server_settings": {"synchronous_commit": "off"}},
+        pool_size=SA_POOL_SIZE,
+        max_overflow=SA_POOL_MAX_OVERFLOW,
         json_serializer=lambda v: orjson.dumps(v).decode(),
     )
 
 
-def create_tables(engine: Engine) -> None:
-    # TODO: for later use Alembic instead
+async def create_tables(engine: AsyncEngine) -> None:
     logger.info("Creating Tables...")
-    Base.metadata.create_all(engine)
-    table_names = inspect(engine).get_table_names()
-    logger.info("Tables created: %s", table_names)
+    async with engine.connect() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.commit()
+    logger.info("Tables created.")
 
 
-def set_up_db() -> Engine:
-    db_url = get_database_url()
-    engine = create_db_engine(db_url)
-    create_tables(engine)
+async def set_up_db() -> AsyncEngine:
+    engine = create_db_engine(get_database_url())
+    await create_tables(engine)
     return engine
 
 
-def foreign_keys_sanity_checks(conn: Connection) -> bool:
+async def foreign_keys_sanity_checks(conn: AsyncConnection) -> bool:
     """Check that there is no orphan columns before adding FKs"""
     total = 0
     for label, sql in FK_ORPHAN_CHECKS:
-        count = conn.execute(text(sql)).scalar_one()
+        count = await conn.scalar(text(sql))
         if count != 0:
             logger.error("%s orphans have been found in %s FK, skipping adding Foreign Keys.", count, label)
         total += count
     return total == 0
 
 
-def add_foreign_keys(e: Engine):
+async def add_foreign_keys(e: AsyncEngine):
     """Add foreign keys after adding the data optimize the loading time"""
     logger.info("Adding Foreign Keys to tables..")
     with cm.catch_db_exceptions():
-        with e.connect() as conn:
-            if foreign_keys_sanity_checks(conn):
+        async with e.connect() as conn:
+            if await foreign_keys_sanity_checks(conn):
                 for ddl in FOREIGN_KEYS:
-                    conn.execute(text(ddl))
-                conn.commit()
+                    await conn.execute(text(ddl))
+                await conn.commit()
                 logger.info("FKs added.")
 
 
 # --------------
 # Insertion
 # --------------
-def _insert_from_dict(list_dict: list[dict], table_class: type[Base], conn: Connection):
+async def _insert_from_dict(list_dict: list[dict], table_class: type[Base], conn: AsyncConnection):
     if not list_dict:
         logger.info("No rows to insert for %s, skipping.", table_class.__name__)
         return
     if not issubclass(table_class, Base):
         raise TypeError("table_class arg must be a subclass of Base.")
     logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
-    conn.execute(insert(cast(Table, table_class.__table__)), list_dict)
+    await conn.execute(insert(cast(Table, table_class.__table__)), list_dict)
 
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
@@ -291,29 +300,29 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
     retry=retry_if_exception(should_retry),
     before_sleep=before_sleep_log(logger, WARNING),
 )
-def _insert_prepared(block_info: dict, coinbase: dict, txs: list, inputs: list, outputs, e: Engine):
+async def _insert_prepared(block_info: dict, coinbase: dict, txs: list, inputs: list, outputs, e: AsyncEngine):
     logger.info("Adding Blocks height: %s and all it's transactions...", block_info["height"])
-    with e.connect() as conn:
-        _insert_from_dict([block_info], Blocks, conn)
-        _insert_from_dict(txs, Transactions, conn)
-        _insert_from_dict([coinbase], CoinbaseInputs, conn)
-        _insert_from_dict(inputs, Inputs, conn)
-        _insert_from_dict(outputs, Outputs, conn)
-        conn.commit()
+    async with e.connect() as conn:
+        await _insert_from_dict([block_info], Blocks, conn)
+        await _insert_from_dict(txs, Transactions, conn)
+        await _insert_from_dict([coinbase], CoinbaseInputs, conn)
+        await _insert_from_dict(inputs, Inputs, conn)
+        await _insert_from_dict(outputs, Outputs, conn)
+        await conn.commit()
     logger.info("Finished processing block %s.", block_info["height"])
 
 
-def insert_block(block: dict, e: Engine):
+async def insert_block(block: dict, e: AsyncEngine):
     if not block:
         logger.error("Block dict empty, nothing to insert.")
         return
     prepared = _prepare_block_data(block)
-    _insert_prepared(*prepared, e)
+    await _insert_prepared(*prepared, e)
 
 
-def insert_blocks(blocks: list[dict], e: Engine):
+async def insert_blocks(blocks: list[dict], e: AsyncEngine):
     if not blocks:
         logger.error("Block list empty, nothing to insert.")
         return
     for block in blocks:
-        insert_block(block, e)
+        await insert_block(block, e)

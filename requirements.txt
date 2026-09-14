@@ -5,5 +5,5 @@ httpx
 aiolimiter
 tenacity
 uvloop
-psycopg2-binary
+asyncpg
 orjson

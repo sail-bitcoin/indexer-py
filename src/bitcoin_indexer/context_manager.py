@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 
+from asyncpg import PostgresError
 from sqlalchemy.exc import SQLAlchemyError
 
 from logger import logger
@@ -9,5 +10,5 @@ from logger import logger
 def catch_db_exceptions():
     try:
         yield
-    except SQLAlchemyError as e:
+    except (SQLAlchemyError, OSError, PostgresError) as e:
         logger.error("%s", e)
