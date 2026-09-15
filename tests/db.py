@@ -6,10 +6,10 @@ import copy
 
 from sqlalchemy import exc
 
-from asyncpg import InvalidPasswordError as PGInvalidPasswordError
+from asyncpg import InvalidPasswordError as PGInvalidPasswordError, Connection as AsyncPGConnection, UniqueViolationError
 import exceptions
 import pytest
-from sqlalchemy import Connection, Engine, select, func, text
+from sqlalchemy import Connection, Engine, PoolProxiedConnection, select, func, text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import DBAPIError, OperationalError, DisconnectionError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
@@ -22,9 +22,23 @@ import tests.variables as var
 def mock_engine():
     engine = MagicMock(spec=AsyncEngine)
     conn = AsyncMock(spec=AsyncConnection)
-    # with e.connect() as conn --> conn is the returned value of e.connect.__enter__()
+    # async with e.begin()/e.connect() as conn --> conn is the returned value of __aenter__()
+    engine.begin.return_value.__aenter__.return_value = conn
     engine.connect.return_value.__aenter__.return_value = conn
     return engine, conn
+
+
+def mock_engine_with_pg():
+    """Mock the chain engine.connect() -> conn.get_raw_connection() -> raw.driver_connection (asyncpg)."""
+    engine, conn = mock_engine()
+    # SQLAlchemy pool wrapper
+    raw = MagicMock(spec=PoolProxiedConnection)
+    conn.get_raw_connection.return_value = raw
+    # asyncpg connection: spec restricts attributes to real asyncpg.Connection ones
+    pg = MagicMock(spec=AsyncPGConnection)
+    pg.is_closed.return_value = False
+    raw.driver_connection = pg
+    return engine, raw, pg
 
 
 def returned_mock__prepare_block_data():
@@ -107,123 +121,137 @@ def test__prepare_block_data_raise_on_errors():
 
 
 # --------------------
-# _insert_from_dict
+# _copy_from_dict
 # --------------------
-async def test__insert_from_dict_executes_with_correct_table_and_params():
-    conn = AsyncMock(spec=AsyncConnection)
+async def test__copy_from_dict_executes_with_correct_table_and_params():
+    pg = AsyncMock(AsyncPGConnection)
     list_dict = [{"hash": "000abc", "height": 1}]
-    await db._insert_from_dict(list_dict, db.Blocks, conn)
+    await db._copy_from_dict(list_dict, db.Blocks, pg)
 
-    conn.execute.assert_called_once()
-    stmt, params = conn.execute.call_args.args
-    assert stmt.table.name == db.Blocks.__tablename__
-    assert params == list_dict
-    conn.execute.assert_awaited_once()
+    params = pg.copy_records_to_table.call_args
+    table_name = params[0]
+    args = params[1]
+
+    pg.copy_records_to_table.assert_awaited_once()
+    assert table_name[0] == db.Blocks.__tablename__
+    assert args["records"][0][0] == list_dict[0]["hash"]
+    assert args["records"][0][1] == list_dict[0]["height"]
 
 
-async def test__insert_from_dict_rejects_non_base_subclass():
-    mock_session = AsyncMock(spec=AsyncConnection)
+async def test__copy_from_dict_rejects_non_base_subclass():
+    pg = MagicMock(spec=AsyncPGConnection)
     with pytest.raises(TypeError):
-        await db._insert_from_dict([{"a": 1}], dict, mock_session)  # pyright: ignore
+        await db._copy_from_dict([{"a": 1}], dict, pg)  # pyright: ignore
+    pg.copy_records_to_table.assert_not_awaited()
 
 
-async def test__insert_from_dict_not_calling_execute_when_list_none_or_empty():
-    conn = AsyncMock(spec=AsyncConnection)
-    await db._insert_from_dict(None, db.Blocks, conn)  # pyright: ignore
-    await db._insert_from_dict([], db.Blocks, conn)
-    conn.execute.assert_not_called()
-
-
-@pytest.mark.integration
-async def test__insert_from_dict_db_insertion(engine):
-    block = copy.deepcopy(var.block_a)
-    block_hash = block["hash"]
-    block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
-
-    async with AsyncSession(engine) as s:
-        conn = await s.connection()
-        await db._insert_from_dict([block_info], db.Blocks, conn)
-        pk = await s.get(db.Blocks, block_hash)
-        await s.commit()
-
-    async with AsyncSession(engine) as s2:
-        pk = await s2.get(db.Blocks, block_hash)
-        # commit changes are visible to another session
-        assert pk is not None
+async def test__copy_from_dict_not_copying_when_list_none_or_empty():
+    pg = MagicMock(spec=AsyncPGConnection)
+    await db._copy_from_dict(None, db.Blocks, pg)  # pyright: ignore
+    await db._copy_from_dict([], db.Blocks, pg)
+    pg.copy_records_to_table.assert_not_awaited()
 
 
 @pytest.mark.integration
-async def test__insert_from_dict_is_not_committing_changes_to_db(engine):
+async def test__copy_from_dict_in_transaction_is_committed(engine):
     block = copy.deepcopy(var.block_a)
-    block_hash = block["hash"]
-    block_info, cb, txs, inputs, outputs = db._prepare_block_data(block)
+    block_info, *_ = db._prepare_block_data(block)
+
+    async with engine.connect() as conn:
+        raw = await conn.get_raw_connection()
+        pg = raw.driver_connection
+        assert pg is not None
+        async with pg.transaction():
+            await db._copy_from_dict([block_info], db.Blocks, pg)
+
+    # committed changes are visible to another session
+    async with AsyncSession(engine) as s:
+        assert await s.get(db.Blocks, block["hash"]) is not None
+
+
+@pytest.mark.integration
+async def test__copy_from_dict_in_failed_transaction_is_rolled_back(engine):
+    block = copy.deepcopy(var.block_a)
+    block_info, *_ = db._prepare_block_data(block)
+
+    async with engine.connect() as conn:
+        raw = await conn.get_raw_connection()
+        pg = raw.driver_connection
+        assert pg is not None
+        with pytest.raises(UniqueViolationError):
+            async with pg.transaction():
+                await db._copy_from_dict([block_info], db.Blocks, pg)
+                # same PK again: second COPY fails and must roll back the first one
+                await db._copy_from_dict([block_info], db.Blocks, pg)
 
     async with AsyncSession(engine) as s:
-        conn = await s.connection()
-        await db._insert_from_dict([block_info], db.Blocks, conn)
-        pk = await s.get(db.Blocks, block_hash)
-        # same session so uncommitted is visible
-        assert pk is not None
-
-    async with AsyncSession(engine) as s2:
-        pk2 = await s2.get(db.Blocks, block_hash)
-        # uncommitted, not visible
-        assert pk2 is None
+        assert await s.get(db.Blocks, block["hash"]) is None
 
 
 # --------------------
 # _insert_prepared
 # --------------------
+@pytest.mark.parametrize("is_closed", [True, False])
+@patch("db._copy_from_dict")
+async def test__insert_prepared_invalidates_only_dead_connections(mock__copy_from_dict, is_closed):
+    e, raw, pg = mock_engine_with_pg()
+    pg.is_closed.return_value = is_closed
+    mock__copy_from_dict.side_effect = PGInvalidPasswordError("error")  # non transient: no retry
+
+    with pytest.raises(PGInvalidPasswordError):
+        await db._insert_prepared(*returned_mock__prepare_block_data(), e)
+
+    assert raw.invalidate.call_count == int(is_closed)
 
 
 @pytest.mark.parametrize("exc_class", db.ASYNCPG_TRANSIENT_CONN_ERR)
-@patch("db._insert_from_dict")
-async def test__insert_prepared_retries_on_asyncpg_transient_errors(mock__insert_from_dict, exc_class):
-    e = AsyncMock(spec=AsyncEngine)
+@patch("db._copy_from_dict")
+async def test__insert_prepared_retries_on_asyncpg_transient_errors(mock__copy_from_dict, exc_class):
+    e, _, _ = mock_engine_with_pg()
     attempts = 3
     prepared = returned_mock__prepare_block_data()
-    mock__insert_from_dict.side_effect = exc_class("error")
+    mock__copy_from_dict.side_effect = exc_class("error")
 
     with fast_retries(db._insert_prepared, attempts):
         with pytest.raises(exc_class):
             await db._insert_prepared(*prepared, e)
 
-    assert mock__insert_from_dict.await_count == attempts
-    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+    assert mock__copy_from_dict.await_count == attempts
+    assert mock__copy_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
 
 
-@patch("db._insert_from_dict")
-async def test__insert_prepared_do_not_retry_on_asyncpg_non_transient_errors(mock__insert_from_dict):
-    e = AsyncMock(spec=AsyncEngine)
+@patch("db._copy_from_dict")
+async def test__insert_prepared_do_not_retry_on_asyncpg_non_transient_errors(mock__copy_from_dict):
+    e, _, _ = mock_engine_with_pg()
     attempts = 3
     prepared = returned_mock__prepare_block_data()
-    mock__insert_from_dict.side_effect = PGInvalidPasswordError("error")
+    mock__copy_from_dict.side_effect = PGInvalidPasswordError("error")
 
     with fast_retries(db._insert_prepared, attempts):
         with pytest.raises(PGInvalidPasswordError):
             await db._insert_prepared(*prepared, e)
 
-    assert mock__insert_from_dict.await_count == 1
-    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+    assert mock__copy_from_dict.await_count == 1
+    assert mock__copy_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
 
 
 @pytest.mark.parametrize("exc_class", [SATimeoutError, OSError, DBAPIError])
-@patch("db._insert_from_dict")
-async def test__insert_prepared_retries_on_some_exceptions(mock__insert_from_dict, exc_class):
-    e = AsyncMock(spec=AsyncEngine)
+@patch("db._copy_from_dict")
+async def test__insert_prepared_retries_on_some_exceptions(mock__copy_from_dict, exc_class):
+    e, _, _ = mock_engine_with_pg()
     attempts = 3
     prepared = returned_mock__prepare_block_data()
     if issubclass(exc_class, DBAPIError):
-        mock__insert_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"), connection_invalidated=True)
+        mock__copy_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"), connection_invalidated=True)
     else:
-        mock__insert_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"))
+        mock__copy_from_dict.side_effect = exc_class("INSERT ...", {}, Exception("connection lost"))
 
     with fast_retries(db._insert_prepared, attempts):
         with pytest.raises(exc_class):
             await db._insert_prepared(*prepared, e)
 
-    assert mock__insert_from_dict.await_count == attempts
-    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+    assert mock__copy_from_dict.await_count == attempts
+    assert mock__copy_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
 
 
 # --------------------
@@ -232,17 +260,18 @@ async def test__insert_prepared_retries_on_some_exceptions(mock__insert_from_dic
 
 
 @patch("db._prepare_block_data")
-async def test_insert_block_handles_execute_5_times_and_commit_once(mock_prepare):
+async def test_insert_block_copies_5_times_in_one_transaction(mock_prepare):
     mock_prepare.return_value = returned_mock__prepare_block_data()
 
-    engine, conn = mock_engine()
+    engine, raw, pg = mock_engine_with_pg()
 
     fake_block = {"height": 1}
     await db.insert_block(fake_block, e=engine)
 
     mock_prepare.assert_called_once_with(fake_block)
-    assert conn.execute.await_count == 5
-    conn.commit.assert_called_once()
+    assert pg.copy_records_to_table.await_count == 5
+    pg.transaction.assert_called_once()
+    raw.invalidate.assert_not_called()
 
 
 @patch("db._prepare_block_data")
@@ -254,9 +283,9 @@ async def test_insert_block_handles__prepare_block_data_failures(mock_prepare):
         await db.insert_block({"height": 1}, e=engine)
 
 
-@patch("db._insert_from_dict")
+@patch("db._copy_from_dict")
 @patch("db._prepare_block_data")
-async def test_insert_block_do_not_retry_on__prepare_block_errors(mock__prepare_block_data, mock__insert_from_dict):
+async def test_insert_block_do_not_retry_on__prepare_block_errors(mock__prepare_block_data, mock__copy_from_dict):
     e = AsyncMock(spec=AsyncEngine)
     block = copy.deepcopy(var.block_a)
     # use a different exc than KeyError: if prepare is retried, as it mutates block dict, it will throw a KeyError
@@ -265,7 +294,7 @@ async def test_insert_block_do_not_retry_on__prepare_block_errors(mock__prepare_
     with pytest.raises(RuntimeError):
         await db.insert_block(block, e)
     assert mock__prepare_block_data.call_count == 1
-    assert mock__insert_from_dict.call_count == 0
+    assert mock__copy_from_dict.call_count == 0
 
 
 @patch("db._insert_prepared")
@@ -282,19 +311,19 @@ async def test_insert_block_passes_prepared_data_to__insert_prepared(mock__prepa
     mock__insert_prepared.assert_called_once_with(*prepared, e)
 
 
-@patch("db._insert_from_dict")
-async def test_insert_block_network_error_handling_with_real__insert_prepared(mock__insert_from_dict):
+@patch("db._copy_from_dict")
+async def test_insert_block_network_error_handling_with_real__insert_prepared(mock__copy_from_dict):
     b = copy.deepcopy(var.block_b)
     b_copy2 = copy.deepcopy(var.block_b)
-    e = AsyncMock(spec=AsyncEngine)
+    e, _, _ = mock_engine_with_pg()
     attempts = 3
-    mock__insert_from_dict.side_effect = OSError
+    mock__copy_from_dict.side_effect = OSError
     with fast_retries(db._insert_prepared, attempts):
         with pytest.raises(OSError):
             await db.insert_block(b, e)
-    assert mock__insert_from_dict.call_count == attempts
+    assert mock__copy_from_dict.call_count == attempts
     prepared = db._prepare_block_data(b_copy2)
-    assert mock__insert_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
+    assert mock__copy_from_dict.await_args.args[:2] == ([prepared[0]], db.Blocks)
 
 
 @pytest.mark.integration

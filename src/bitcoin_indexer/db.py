@@ -6,7 +6,7 @@ from typing import cast
 import asyncpg
 import orjson
 from dotenv import load_dotenv
-from sqlalchemy import JSON, Column, Float, BigInteger, Integer, String, Table, insert, text
+from sqlalchemy import JSON, Column, Float, BigInteger, Integer, String, Table, text
 from sqlalchemy.exc import DBAPIError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection, create_async_engine
@@ -30,7 +30,12 @@ class Base(DeclarativeBase):
 
 load_dotenv()
 
-ASYNCPG_TRANSIENT_CONN_ERR = (asyncpg.InsufficientResourcesError, asyncpg.OperatorInterventionError)
+ASYNCPG_TRANSIENT_CONN_ERR = (
+    asyncpg.InsufficientResourcesError,
+    asyncpg.OperatorInterventionError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+)
 
 
 def should_retry(exc: BaseException) -> bool:
@@ -235,14 +240,22 @@ async def add_foreign_keys(e: AsyncEngine):
 # --------------
 # Insertion
 # --------------
-async def _insert_from_dict(list_dict: list[dict], table_class: type[Base], conn: AsyncConnection):
+async def _copy_from_dict(list_dict: list[dict], table_class: type[Base], pg: asyncpg.Connection):
     if not list_dict:
         logger.info("No rows to insert for %s, skipping.", table_class.__name__)
         return
     if not issubclass(table_class, Base):
         raise TypeError("table_class arg must be a subclass of Base.")
     logger.info("Inserting %s representations of the resource %s...", len(list_dict), table_class.__name__)
-    await conn.execute(insert(cast(Table, table_class.__table__)), list_dict)
+
+    table = cast(Table, table_class.__table__)
+    cols = [c.name for c in table.columns]
+    json_cols = [c.name for c in table.columns if isinstance(c.type, JSON)]
+    records = [
+        tuple(orjson.dumps(d.get(c)).decode() if c in json_cols else d.get(c) for c in cols)
+        for d in list_dict
+    ]
+    await pg.copy_records_to_table(table.name, records=records, columns=cols)
 
 
 def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
@@ -300,15 +313,25 @@ def _prepare_block_data(block: dict) -> tuple[dict, dict, list, list, list]:
     retry=retry_if_exception(should_retry),
     before_sleep=before_sleep_log(logger, WARNING),
 )
-async def _insert_prepared(block_info: dict, coinbase: dict, txs: list, inputs: list, outputs, e: AsyncEngine):
+async def _insert_prepared(
+    block_info: dict, coinbase: dict, txs: list, inputs: list, outputs, e: AsyncEngine
+):
     logger.info("Adding Blocks height: %s and all it's transactions...", block_info["height"])
     async with e.connect() as conn:
-        await _insert_from_dict([block_info], Blocks, conn)
-        await _insert_from_dict(txs, Transactions, conn)
-        await _insert_from_dict([coinbase], CoinbaseInputs, conn)
-        await _insert_from_dict(inputs, Inputs, conn)
-        await _insert_from_dict(outputs, Outputs, conn)
-        await conn.commit()
+        raw = await conn.get_raw_connection()
+        pg: asyncpg.Connection | None = raw.driver_connection
+        if pg is None:
+            raise RuntimeError("No asyncpg connection available, pooled connection was invalidated.")
+        try:
+            async with pg.transaction():
+                await _copy_from_dict([block_info], Blocks, pg)
+                await _copy_from_dict(txs, Transactions, pg)
+                await _copy_from_dict([coinbase], CoinbaseInputs, pg)
+                await _copy_from_dict(inputs, Inputs, pg)
+                await _copy_from_dict(outputs, Outputs, pg)
+        finally:
+            if pg.is_closed():
+                raw.invalidate()
     logger.info("Finished processing block %s.", block_info["height"])
 
 

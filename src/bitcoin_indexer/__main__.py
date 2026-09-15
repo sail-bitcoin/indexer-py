@@ -53,11 +53,8 @@ async def main():
     db_semaphore = asyncio.Semaphore(db.SA_POOL_SIZE)
     try:
         async with sc:
-            # fmt: off
-            await asyncio.gather(*[
-                    process_block(sc, h, e, db_semaphore)
-                    for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)
-                ]
+            await asyncio.gather(
+                *[process_block(sc, h, e, db_semaphore) for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)]
             )
         await db.add_foreign_keys(e)
     finally:

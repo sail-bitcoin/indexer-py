@@ -60,13 +60,12 @@ class RpcClient:
 
     async def _get_session(self) -> httpx.AsyncClient:
         if self._session is None or self._session.is_closed:
-            # fmt: off
             self._session = httpx.AsyncClient(
                 timeout=httpx.Timeout(connect=TIMEOUT_CONNECT, read=TIMEOUT_READ, write=TIMEOUT_WRITE, pool=TIMEOUT_POOL),
                 limits=httpx.Limits(
                     max_connections=self.max_conn,
                     max_keepalive_connections=self.max_conn_keepalived,
-                )
+                ),
             )
         return self._session
 
@@ -84,7 +83,6 @@ class RpcClient:
                 raise RuntimeError("Could not retrieve RPC_URL — check .env file")
         return self._rpc_url
 
-    # fmt: off
     @retry(
         stop=stop_after_attempt(10),
         wait=wait_exponential_jitter(initial=1, jitter=3, max=10),

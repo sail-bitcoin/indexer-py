@@ -17,13 +17,14 @@ def with_pgcode(exc: Exception, pgcode: str) -> Exception:
     return exc
 
 
-# fmt: off
 db_errors = [
     DBAPIError("INSERT ...", {}, Exception("connection is closed"), connection_invalidated=True),
     IntegrityError("INSERT ...", {}, Exception("duplicate key")),
     SATimeoutError("pool exhausted"),
     ConnectionRefusedError(),
     asyncpg.CannotConnectNowError("the database system is starting up"),
+    asyncpg.ConnectionDoesNotExistError("connection was closed in the middle of operation"),
+    asyncpg.InterfaceError("connection is closed"),
 ]
 
 rpc_errors = [
@@ -41,7 +42,6 @@ runtime_errors = [
     ValueError("error"),
     OverflowError("error"),
 ]
-# fmt: on
 
 
 def ids(e):
@@ -78,13 +78,15 @@ def test__db_errors_are_logged_as_insertion_failures(exc, clear_dlq, caplog):
     assert caplog.messages[-1].startswith(f"Block {H} insertion failed")
 
 
-# fmt: off
-@pytest.mark.parametrize(("exc", "pgcode"), [
-    (IntegrityError("INSERT ...", {}, with_pgcode(Exception("duplicate key"), "23505")), "23505"),
-    (asyncpg.CannotConnectNowError("the database system is starting up"), "57P03"),
-    (ConnectionRefusedError(), None),
-], ids=["wrapped_asyncpg", "raw_asyncpg", "oserror"])
-# fmt: on
+@pytest.mark.parametrize(
+    ("exc", "pgcode"),
+    [
+        (IntegrityError("INSERT ...", {}, with_pgcode(Exception("duplicate key"), "23505")), "23505"),
+        (asyncpg.CannotConnectNowError("the database system is starting up"), "57P03"),
+        (ConnectionRefusedError(), None),
+    ],
+    ids=["wrapped_asyncpg", "raw_asyncpg", "oserror"],
+)
 def test__db_errors_log_the_pgcode(exc, pgcode, clear_dlq, caplog):
     with dlq.add_to_deadletterqueue(H):
         raise exc

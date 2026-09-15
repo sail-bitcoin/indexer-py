@@ -22,7 +22,6 @@ async def main():
     # wathever your main logic
     e = db.set_up_db()
     async with rpc.Blocks(MAX_CONN, MAX_CONN_KEEPALIVE) as b:
-        # fmt: off
         await asyncio.gather(*[
                 process_block(b, h, e)
                 for h in range(START_HEIGHT, START_HEIGHT + N_BLOCKS)

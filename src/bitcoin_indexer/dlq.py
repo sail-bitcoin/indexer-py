@@ -16,7 +16,7 @@ def add_to_deadletterqueue(height: int):
     """When db insertion fail (even after retries for retryable exceptions) add to a Dead Letter Queue the block"""
     try:
         yield
-    except (SQLAlchemyError, OSError, asyncpg.PostgresError) as e:
+    except (SQLAlchemyError, OSError, asyncpg.PostgresError, asyncpg.InterfaceError) as e:
         orig = getattr(e, "orig", e)  # asyncpg exception, if any
         pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
         logger.error("Block %s insertion failed [%s]: %s", height, pgcode, e)
